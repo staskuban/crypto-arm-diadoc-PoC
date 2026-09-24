@@ -1,9 +1,12 @@
 export interface SignResult {
-  /**
-   * Detached CMS SignedData, binary (for Диадок `SignedContent.Signature`). КриптоАРМ Server emits
-   * BER with indefinite lengths, not strict DER.
-   */
+  /** Detached CMS SignedData, DER (for Диадок `SignedContent.Signature`). */
   signature: Buffer;
+  /**
+   * The signature exactly as the service returned it, set only when it differed from `signature`
+   * (e.g. КриптоАРМ Server emits BER with indefinite lengths). For debugging only: never send it,
+   * and log a digest or prefix rather than the whole binary.
+   */
+  rawSignature?: Buffer;
 }
 
 export interface SignerInfo {

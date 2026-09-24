@@ -1,10 +1,14 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { buildUtdAttachment, contentPlacement, INLINE_CONTENT_LIMIT } from './attachment.js';
 import { UtdError } from './errors.js';
 import type { UtdDocument } from './parse.js';
 
-const signature = Buffer.from([0x30, 0x82, 0x01, 0x00, 0x06, 0x09]);
+// ContentInfo { pkcs7-signedData, [0] {} }: a minimal DER CMS envelope.
+const SIGNED_DATA_OID = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+const signature = Buffer.from([0x30, 0x0d, ...SIGNED_DATA_OID, 0xa0, 0x00]);
 
 function doc(content: Buffer): UtdDocument {
   return {
@@ -56,8 +60,17 @@ describe('buildUtdAttachment', () => {
     expect(attachment.customDocumentId).toBe('upd-42');
   });
 
+  it('accepts a real DER CMS (КриптоАРМ Server output normalized by OpenSSL)', () => {
+    const real = readFileSync(
+      new URL('../asn1/fixtures/server-cms-detached.openssl.der', import.meta.url),
+    );
+    expect(buildUtdAttachment(doc(Buffer.from('x')), real).signature).toBe(real);
+  });
+
   it('rejects a signature that is not DER (CMS SignedData is a SEQUENCE)', () => {
-    for (const bad of [Buffer.alloc(0), Buffer.from('MIIB', 'ascii')]) {
+    const ber = Buffer.from([0x30, 0x80, ...SIGNED_DATA_OID, 0xa0, 0x80, 0x00, 0x00, 0x00, 0x00]);
+    const truncated = signature.subarray(0, -1);
+    for (const bad of [Buffer.alloc(0), Buffer.from('MIIB', 'ascii'), ber, truncated]) {
       expect(() => buildUtdAttachment(doc(Buffer.from('x')), bad)).toThrow(
         expect.objectContaining({ code: 'INVALID_SIGNATURE' }),
       );

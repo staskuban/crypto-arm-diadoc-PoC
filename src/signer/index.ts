@@ -3,6 +3,7 @@ export {
   SignerConfigError,
   SignerError,
   SignerHttpError,
+  SignerKeyNotFoundError,
   SignerNetworkError,
   SignerResponseError,
   SignerTimeoutError,

@@ -26,3 +26,5 @@ docker/cryptoarm-server/certs/**/*.cer
 *.p7b
 *.000/
 *.tmp
+# Public test data (CMS of fixture bytes, no keys)
+!src/asn1/fixtures/*.der

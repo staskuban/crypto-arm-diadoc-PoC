@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Proof of concept. Implemented: `src/signer` (КриптоАРМ Server signer), `src/diadoc` (auth + API client), `src/utd` (УПД parsing and attachment); `src/pipeline` is still a stub (T5). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
+Proof of concept. Implemented: `src/signer` (КриптоАРМ Server signer), `src/diadoc` (auth + API client), `src/utd` (УПД parsing and attachment), `src/asn1` (BER → DER for the CMS from КриптоАРМ Server); `src/pipeline` is still a stub (T5). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
 
 - Task DAG, per-task status and done-criteria: `docs/plan.md` (source of truth for the Orca worktree tree; the `graph-root` worktree is the root parent of every task worktree).
 - Research findings with sources (Диадок formats, signing infrastructure): `docs/research.md`.
@@ -64,7 +64,7 @@ Git: default branch is `master` (not `main`). The stash stack is shared across w
 ### КриптоАРМ Server (self-hosted crypto backend, docker compose)
 - Repo & install guide: https://git.digtlab.ru/trusted/cryptoarm/server (compose file, Dockerfile, `.env` are fetched from `docker/` in that repo).
 - Default port `3037`, Swagger at `/docs`. Auth via `AUTH_MODE=none|apikey` + `API_KEYS`; key passed as `X-API-Key`, `Authorization: Bearer`, or `?apiKey=`.
-- Signing: `POST /cms/sign` with `{ cert, data, password?, detached?, cadesStandard? }` (Base64) → `{ cms }`. `detached` defaults to **true**, `cadesStandard` to `CAdES-BES`. Also `/cms/verify`, `/cert/verify`, `/hash`, `/cms/attached-to-detached`.
+- Signing: `POST /cms/sign` with `{ cert, data, password?, detached?, cadesStandard? }` (Base64) → `{ cms }`. `detached` defaults to **true**, `cadesStandard` to `CAdES-BES`. The `cms` is **BER with indefinite lengths**; `ServerCmsSigner` normalizes it to DER (`src/asn1`), keeping the raw bytes as `rawSignature`. A `.cer` whose key is not in `uMy` → 400 «Закрытый ключ … не найден» → `SignerKeyNotFoundError`. Also `/cms/verify`, `/cert/verify`, `/hash`, `/cms/attached-to-detached`.
 - Keys stay on the server: install PFX at container start (`/certs/user/*.pfx`, or `CERT_PFX_BASE64` + `CERT_PFX_PIN`; roots in `/certs/root`), then pass only the public `.cer` as `cert` — the key is found in `uMy` by thumbprint. Passing a `.pfx` also works but installs it temporarily per request. Test cert/key from CRYPTO-PRO Test Center 2 ship in the upstream repo `certs/`.
 - `.env`: `CRYPTOPRO_LICENSE` may be empty (CSP Demo trial). `TRUSTED_LICENSE` is **required** — without it the server exits `Trusted Crypto license is invalid` (verified 2026-09-24). Keep real licenses only in the untracked `.env`.
 - **Manual prerequisites**: КриптоПро CSP 5.0 `linux-amd64_deb.tgz` downloaded by a human (cryptopro.ru login) into `docker/cryptoarm-server/cryptopro/`, and a `TRUSTED_LICENSE` key. Image is x86_64 only — on Apple Silicon it runs under emulation (build ~30 s once the base image is cached).

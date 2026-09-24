@@ -1,9 +1,13 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it, vi } from 'vitest';
 
+import { isDerFramed } from '../asn1/index.js';
 import {
   SignerConfigError,
   SignerError,
   SignerHttpError,
+  SignerKeyNotFoundError,
   SignerNetworkError,
   SignerResponseError,
   SignerTimeoutError,
@@ -17,6 +21,13 @@ const SIGNED_DATA_OID = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0
 const cmsDer = Buffer.from([0x30, 0x0d, ...SIGNED_DATA_OID, 0xa0, 0x00]);
 // КриптоАРМ Server returns BER with indefinite lengths (seen live): 30 80 ... 00 00.
 const cmsBer = Buffer.from([0x30, 0x80, ...SIGNED_DATA_OID, 0xa0, 0x80, 0x00, 0x00, 0x00, 0x00]);
+// Real /cms/sign output (BER) and its DER re-encoding by OpenSSL, see src/asn1/fixtures.
+const serverBer = readFileSync(
+  new URL('../asn1/fixtures/server-cms-detached.ber', import.meta.url),
+);
+const serverDer = readFileSync(
+  new URL('../asn1/fixtures/server-cms-detached.openssl.der', import.meta.url),
+);
 // windows-1251 bytes that are not valid UTF-8: must reach the server unchanged.
 const data = Buffer.from([0x3c, 0xc4, 0xee, 0xea, 0x3e, 0x00, 0xff]);
 
@@ -129,11 +140,20 @@ describe('ServerCmsSigner.sign', () => {
     const result = await signer.sign(data);
     expect(Buffer.isBuffer(result.signature)).toBe(true);
     expect(result.signature).toEqual(cmsDer);
+    expect(result.rawSignature).toBeUndefined();
   });
 
-  it('accepts a BER CMS with indefinite lengths', async () => {
+  it('normalizes a BER CMS with indefinite lengths to DER and keeps the raw bytes', async () => {
     const { signer } = setup(json({ cms: cmsBer.toString('base64') }));
-    await expect(signer.sign(data)).resolves.toEqual({ signature: cmsBer });
+    await expect(signer.sign(data)).resolves.toEqual({ signature: cmsDer, rawSignature: cmsBer });
+  });
+
+  it('normalizes a real КриптоАРМ Server CMS to the same DER as OpenSSL', async () => {
+    const { signer } = setup(json({ cms: serverBer.toString('base64') }));
+    const result = await signer.sign(data);
+    expect(result.signature).toEqual(serverDer);
+    expect(isDerFramed(result.signature)).toBe(true);
+    expect(result.rawSignature).toEqual(serverBer);
   });
 
   it('sends X-API-Key when configured', async () => {
@@ -175,6 +195,27 @@ describe('ServerCmsSigner.sign', () => {
     });
     expect((error as Error).message).toContain('400');
     expect((error as Error).message).toContain('Сертификат не предоставлен');
+  });
+
+  it('maps a missing private key to SignerKeyNotFoundError (still a SignerHttpError)', async () => {
+    // Verbatim КриптоАРМ Server answer for a real .cer whose key is not in uMy (2026-09-24).
+    const message =
+      'Закрытый ключ для переданного сертификата не найден в хранилище КриптоПро. Установите контейнер заранее или передайте файл PFX/P12.';
+    const { signer } = setup(
+      json({ message, error: 'Bad Request', statusCode: 400 }, { status: 400 }),
+    );
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerKeyNotFoundError);
+    expect(error).toBeInstanceOf(SignerHttpError);
+    expect(error).toMatchObject({ status: 400, upstreamMessage: message, operation: 'sign' });
+    expect((error as Error).name).toBe('SignerKeyNotFoundError');
+  });
+
+  it('keeps other 400 errors as plain SignerHttpError', async () => {
+    const { signer } = setup(json({ message: 'Сертификат не предоставлен' }, { status: 400 }));
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerHttpError);
+    expect(error).not.toBeInstanceOf(SignerKeyNotFoundError);
   });
 
   it('joins array validation messages', async () => {
