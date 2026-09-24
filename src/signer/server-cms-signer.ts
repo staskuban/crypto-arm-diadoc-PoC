@@ -1,4 +1,3 @@
-import { Asn1Error, berToDer } from '../asn1/index.js';
 import { toDerCertificate } from './certificate.js';
 import {
   SignerConfigError,
@@ -10,17 +9,14 @@ import {
   SignerTimeoutError,
   type SignerOperation,
 } from './errors.js';
+import { HEADER_TOKEN, isRecord, parseBaseUrl, toDerSignature, validateTimeout } from './shared.js';
 import type { SignResult, Signer, SignerCallOptions, SignerInfo, VerifyResult } from './signer.js';
 
+export { MAX_TIMEOUT_MS } from './shared.js';
+
 export const DEFAULT_TIMEOUT_MS = 120_000;
-/** Timers overflow above 2^31-1 ms and would fire immediately. */
-export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 const MAX_ERROR_TEXT = 500;
-/** OID 1.2.840.113549.1.7.2 (pkcs7-signedData), DER encoded with tag and length. */
-const SIGNED_DATA_OID = Buffer.from('06092a864886f70d010702', 'hex');
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-/** Visible ASCII only: anything else is rejected by fetch with the value in the message. */
-const HEADER_TOKEN = /^[\x21-\x7e]+$/;
 /**
  * КриптоАРМ Server 400 text when the certificate's key is not in `uMy` (seen 2026-09-24:
  * «Закрытый ключ для переданного сертификата не найден в хранилище КриптоПро. …»). Loose on
@@ -52,23 +48,14 @@ export class ServerCmsSigner implements Signer {
   readonly #fetch: typeof fetch;
 
   constructor(options: ServerCmsSignerOptions) {
-    this.#baseUrl = parseBaseUrl(options.baseUrl);
+    this.#baseUrl = parseBaseUrl(options.baseUrl, 'КриптоАРМ Server URL');
     this.certificate = toDerCertificate(options.certificate);
     this.#certificate = this.certificate.toString('base64');
     if (options.apiKey !== undefined && !HEADER_TOKEN.test(options.apiKey)) {
       throw new SignerConfigError('apiKey must be non-empty visible ASCII without spaces');
     }
     this.#apiKey = options.apiKey;
-    this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (
-      !Number.isInteger(this.#timeoutMs) ||
-      this.#timeoutMs <= 0 ||
-      this.#timeoutMs > MAX_TIMEOUT_MS
-    ) {
-      throw new SignerConfigError(
-        `timeoutMs must be an integer in 1..${String(MAX_TIMEOUT_MS)}, got ${String(this.#timeoutMs)}`,
-      );
-    }
+    this.#timeoutMs = validateTimeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     this.#fetch = options.fetch ?? globalThis.fetch;
   }
 
@@ -93,21 +80,8 @@ export class ServerCmsSigner implements Signer {
     if (!BASE64.test(compact)) {
       throw new SignerResponseError('sign', '"cms" is not Base64');
     }
-    const raw = Buffer.from(compact, 'base64');
-    let signature: Buffer;
-    try {
-      signature = berToDer(raw);
-    } catch (error) {
-      if (error instanceof Asn1Error) {
-        throw new SignerResponseError('sign', `"cms" is not valid BER: ${error.message}`);
-      }
-      throw error;
-    }
-    if (!isCmsSignedData(signature)) {
-      throw new SignerResponseError('sign', '"cms" is not a CMS SignedData');
-    }
     // Диадок requires DER; the server emits BER with indefinite lengths (docs/plan.md D1).
-    return signature.equals(raw) ? { signature } : { signature, rawSignature: raw };
+    return toDerSignature('sign', Buffer.from(compact, 'base64'), '"cms"');
   }
 
   async verify(
@@ -193,41 +167,6 @@ export class ServerCmsSigner implements Signer {
   }
 }
 
-/** Parses the base URL; error messages never echo it since it may carry secrets. */
-function parseBaseUrl(raw: string): URL {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new SignerConfigError('КриптоАРМ Server URL is not a valid URL');
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new SignerConfigError(`КриптоАРМ Server URL must be http(s), got ${url.protocol}`);
-  }
-  if (url.username || url.password) {
-    throw new SignerConfigError('КриптоАРМ Server URL must not contain credentials');
-  }
-  if (url.search || url.hash) {
-    // A query such as ?apiKey= would be silently dropped when resolving endpoint paths.
-    throw new SignerConfigError('КриптоАРМ Server URL must not contain a query or fragment');
-  }
-  // Resolve relative paths against the prefix: "https://gw/cryptoarm" + "cms/sign".
-  if (!url.pathname.endsWith('/')) url.pathname += '/';
-  return url;
-}
-
-/**
- * Checks the ContentInfo envelope: a SEQUENCE starting with the pkcs7-signedData OID. The input
- * must come from `berToDer` (one well-formed element spanning the buffer), so the header is
- * trusted. The rest is left to the verifier.
- */
-function isCmsSignedData(der: Buffer): boolean {
-  if (der[0] !== 0x30) return false;
-  const first = der[1] ?? 0;
-  const offset = first < 0x80 ? 2 : 2 + (first & 0x7f);
-  return der.subarray(offset, offset + SIGNED_DATA_OID.length).equals(SIGNED_DATA_OID);
-}
-
 function requireNonEmpty(operation: SignerOperation, value: Buffer, name: string): void {
   if (value.length === 0) throw new SignerError(`${operation}: ${name} must not be empty`);
 }
@@ -260,8 +199,4 @@ function toSignerInfo(sign: Record<string, unknown>): SignerInfo {
   if (typeof sign.isCertValid === 'boolean') info.certValid = sign.isCertValid;
   if (typeof sign.isDetached === 'boolean') info.detached = sign.isDetached;
   return info;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

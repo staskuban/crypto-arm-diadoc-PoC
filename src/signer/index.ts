@@ -16,4 +16,15 @@ export {
   ServerCmsSigner,
   type ServerCmsSignerOptions,
 } from './server-cms-signer.js';
-export { loadServerCmsSignerOptions, type SignerEnv } from './config.js';
+export {
+  DEFAULT_DOCUMENTS_TIMEOUT_MS,
+  DocumentsCloudSigner,
+  type DocumentsAuth,
+  type DocumentsCloudSignerOptions,
+} from './documents-cloud-signer.js';
+export {
+  createSignerFromEnv,
+  loadDocumentsCloudSignerEnv,
+  loadServerCmsSignerOptions,
+  type SignerEnv,
+} from './config.js';

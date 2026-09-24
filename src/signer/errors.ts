@@ -29,9 +29,11 @@ export class SignerHttpError extends SignerError {
 }
 
 /**
- * The certificate's private key is not installed in the server store (`uMy`). Detected from the
- * КриптоАРМ Server message text, the only signal it gives (HTTP 400, no error code). Fix the
- * server key store or `SIGNER_CERT_PATH`; retrying does not help.
+ * No usable signing key; detected from message texts only (no error codes). КриптоАРМ Server (also
+ * when relayed by Документы): the certificate's private key is not in the server store (`uMy`) —
+ * fix the store or `SIGNER_CERT_PATH`. КриптоАРМ Документы `cloud-sign`: the CA service has no
+ * certificate for the user's e-mail — fix that mapping (stand: `ca-stub/nginx.conf`). Retrying
+ * does not help.
  */
 export class SignerKeyNotFoundError extends SignerHttpError {
   override name = 'SignerKeyNotFoundError';
