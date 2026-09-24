@@ -134,7 +134,7 @@ payload signs in 1.4 s under these limits. tmpfs contents count towards the memo
 
 The healthcheck also requires `/etc/opt/cprocsp/config64.ini`. With an **image older than I6** under this compose
 file, nothing seeds the tmpfs: the API answers, but CSP fails with `Provider DLL failed to initialize correctly
-[0x8009001d]` and `/cms/sign` returns "key not found" (verified, D20). The check turns that into `unhealthy`, so
+[0x8009001d]` and `/cms/sign` returns "key not found" (verified, D40). The check turns that into `unhealthy`, so
 `up --wait` fails instead of reporting a working stand. The other direction is safe: the new image under an older
 compose file starts and signs as before (verified).
 
@@ -144,7 +144,7 @@ the server container for about 30 s, so warn whoever uses the stand, e.g. T7):
 ```sh
 docker image inspect kryptoarm-diadoc/cryptoarm-server:pre-i6 >/dev/null 2>&1 ||  # never overwrite it on a re-run
   docker tag kryptoarm-diadoc/cryptoarm-server:local kryptoarm-diadoc/cryptoarm-server:pre-i6  # rollback image
-docker compose build cryptoarm-server-image         # FIRST: the new compose file needs the new image (D20)
+docker compose build cryptoarm-server-image         # FIRST: the new compose file needs the new image (D40)
 docker compose --dry-run up -d                      # expect only cryptoarm-server to be recreated
 docker compose up -d --wait cryptoarm-server        # fails if unhealthy (old image or CSP broken)
 docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' \
@@ -165,7 +165,7 @@ the I3 key) is a bind mount and is kept.
 back to the old image, run `docker tag kryptoarm-diadoc/cryptoarm-server:pre-i6 kryptoarm-diadoc/cryptoarm-server:local`
 now, **after** restoring the file and **before** `up`. Then run `docker compose up -d --wait cryptoarm-server`; compose
 recreates the container when the config or the image ID changed. The I6 image also works under the old file, so the
-retag is optional. Never run the old image with the new file (D20). Commit the restored compose file (or revert the
+retag is optional. Never run the old image with the new file (D40). Commit the restored compose file (or revert the
 merge) in `graph-root`, so that the next `up` does not re-apply it.
 
 ## Certificates and keys

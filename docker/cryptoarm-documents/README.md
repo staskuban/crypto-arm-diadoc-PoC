@@ -58,7 +58,7 @@ All three containers run with `read_only: true` and CPU/memory/PID limits (I6). 
 Measured on the throwaway stand: API ~120–170 MiB, 12 PIDs; db ~30 MiB; ca-stub ~7 MiB, 9 PIDs (nginx starts one
 worker per host CPU, so on a host with more than ~30 CPUs raise `DOCUMENTS_CA_STUB_PIDS`). A `*_CPUS` value above the CPUs of the Docker VM fails the start. The tmpfs `/run/postgresql` is owned by uid/gid 999 (Debian `postgres` image); an alpine image (uid 70) needs another value.
 
-**No pm2 (D21).** Upstream runs `pm2-runtime ecosystem.config.js`: one fork-mode instance of `dist/main.js`, with
+**No pm2 (D41).** Upstream runs `pm2-runtime ecosystem.config.js`: one fork-mode instance of `dist/main.js`, with
 copies of its output in `/logs/app-out.log` / `app-err.log`. pm2 keeps its pids, sockets and the `pm2-logrotate`
 module from the image in `/root/.pm2`. A tmpfs there would hide the module; a writable volume would keep a stale copy
 across image upgrades. So the stand runs `node dist/main.js` directly. The app log goes to stdout (`docker logs`),
