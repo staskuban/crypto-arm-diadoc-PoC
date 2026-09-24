@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
     ports:
       # Loopback only: the service signs with the keys installed in the container.
-      - "127.0.0.1:${CRYPTOARM_SERVER_PORT:-3037}:3037"
+      - '127.0.0.1:${CRYPTOARM_SERVER_PORT:-3037}:3037'
     env_file:
       - .env
     volumes:
@@ -22,7 +22,7 @@ services:
       - ./certs:/certs:ro
     healthcheck:
       # /health/memory is excluded from API key auth upstream.
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3037/health/memory"]
+      test: ['CMD', 'curl', '-fsS', '-o', '/dev/null', 'http://127.0.0.1:3037/health/memory']
       interval: 15s
       timeout: 5s
       retries: 5

@@ -13,10 +13,10 @@ keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follo
 2. Put it at `docker/cryptoarm-server/cryptopro/linux-amd64_deb.tgz`. It is git-ignored.
 3. Obtain a **КриптоАРМ Server license key** (test key from the vendor) and set `TRUSTED_LICENSE` in `.env`.
 
-| Variable | Empty value means (verified 2026-09-24) |
-|---|---|
-| `CRYPTOPRO_LICENSE` | КриптоПро CSP trial: `License type: Demo`, 94 days left on first start |
-| `TRUSTED_LICENSE` | start script warns and continues; CSP and keys get installed, then `node dist/main.js` exits with `Trusted Crypto license is invalid` and the container restarts in a loop. **No signing without it.** A wrong key fails the same way even though `setup_license` prints "saved successfully". |
+| Variable            | Empty value means (verified 2026-09-24)                                                                                                                                                                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CRYPTOPRO_LICENSE` | КриптоПро CSP trial: `License type: Demo`, 94 days left on first start                                                                                                                                                                                                                         |
+| `TRUSTED_LICENSE`   | start script warns and continues; CSP and keys get installed, then `node dist/main.js` exits with `Trusted Crypto license is invalid` and the container restarts in a loop. **No signing without it.** A wrong key fails the same way even though `setup_license` prints "saved successfully". |
 
 The image is `linux/amd64` only. On Apple Silicon it runs under emulation, so it is slower.
 
