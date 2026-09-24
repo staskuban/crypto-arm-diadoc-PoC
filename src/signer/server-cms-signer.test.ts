@@ -111,6 +111,14 @@ describe('ServerCmsSigner construction', () => {
   );
 });
 
+describe('ServerCmsSigner.certificate', () => {
+  it('exposes the configured public certificate as DER', () => {
+    const pem = `-----BEGIN CERTIFICATE-----\n${certDer.toString('base64')}\n-----END CERTIFICATE-----\n`;
+    expect(setup(json({})).signer.certificate).toEqual(certDer);
+    expect(setup(json({}), { certificate: Buffer.from(pem) }).signer.certificate).toEqual(certDer);
+  });
+});
+
 describe('ServerCmsSigner.sign', () => {
   it('posts a detached CAdES-BES request with only the public certificate', async () => {
     const { signer, fetchMock } = setup(json({ cms: cmsDer.toString('base64') }));
@@ -209,6 +217,13 @@ describe('ServerCmsSigner.sign', () => {
     expect(error).toBeInstanceOf(SignerHttpError);
     expect(error).toMatchObject({ status: 400, upstreamMessage: message, operation: 'sign' });
     expect((error as Error).name).toBe('SignerKeyNotFoundError');
+  });
+
+  it('recognizes a missing key whatever the certificate name contains (dots, line breaks)', async () => {
+    const message =
+      'Закрытый ключ для сертификата CN=signer.example.ru, O=ООО "А.Б."\nне найден в хранилище.';
+    const { signer } = setup(json({ message }, { status: 400 }));
+    await expect(signer.sign(data)).rejects.toBeInstanceOf(SignerKeyNotFoundError);
   });
 
   it('keeps other 400 errors as plain SignerHttpError', async () => {
@@ -399,8 +414,35 @@ describe('ServerCmsSigner.verify', () => {
           valid: true,
           mathValid: true,
           chainValid: true,
+          detached: true,
         },
       ],
+    });
+  });
+
+  it('reports certificate validity, expiry and the detached flag when the server gives them', async () => {
+    const sign = {
+      ...validResponse.signs[0],
+      certificate: {
+        ...validResponse.signs[0]?.certificate,
+        notAfter: '2026-10-28T12:32:11.000Z',
+      },
+      isCertValid: false,
+      isCertChainValid: false,
+      isValidSign: false,
+    };
+    const { signer } = setup(json({ isValidSign: false, signs: [sign] }));
+    const result = await signer.verify(data, signature);
+    expect(result.signers[0]).toEqual({
+      subject: 'CN=cryptoarm.server.test',
+      thumbprint: '0e84b5',
+      signingTime: '2026-09-24T10:52:48.000Z',
+      notAfter: '2026-10-28T12:32:11.000Z',
+      valid: false,
+      mathValid: true,
+      chainValid: false,
+      certValid: false,
+      detached: true,
     });
   });
 

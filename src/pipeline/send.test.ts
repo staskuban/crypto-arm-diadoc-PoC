@@ -26,6 +26,7 @@ import {
   type Signer,
   type VerifyResult,
 } from '../signer/index.js';
+import { parseCmsSignedData } from '../asn1/index.js';
 import { UtdError } from '../utd/index.js';
 import { PipelineError } from './errors.js';
 import { operationIdFor } from './operation-id.js';
@@ -35,10 +36,21 @@ const FIXTURES = new URL('../utd/fixtures/', import.meta.url);
 const FILE_NAME = readdirSync(FIXTURES).find((f) => f.endsWith('.xml')) ?? '';
 const CONTENT = readFileSync(new URL(FILE_NAME, FIXTURES));
 
-// ContentInfo { pkcs7-signedData, [0] {} }: a minimal DER CMS envelope.
-const SIGNED_DATA_OID = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
-const DER_SIGNATURE = Buffer.from([0x30, 0x0d, ...SIGNED_DATA_OID, 0xa0, 0x00]);
-const BER_SIGNATURE = Buffer.from([0x30, 0x80, ...SIGNED_DATA_OID, 0xa0, 0x00, 0x00, 0x00]);
+// A real detached CMS (КриптоАРМ Server, CN=cryptoarm.server.test) and its signer certificate. The
+// fake verifier decides validity; the pipeline checks the structure and the signer.
+const DER_SIGNATURE = readFileSync(
+  new URL('../asn1/fixtures/server-cms-detached.openssl.der', import.meta.url),
+);
+const BER_SIGNATURE = readFileSync(
+  new URL('../asn1/fixtures/server-cms-detached.ber', import.meta.url),
+);
+const SIGNER_CERT = parseCmsSignedData(DER_SIGNATURE).certificates[0] ?? Buffer.alloc(0);
+const THUMBPRINT = '0e84b59e46e4648fc3dc808eb94d58f4de673f1f';
+const OTHER_CERT = readFileSync(
+  new URL('../signer/fixtures/cryptopro-test-ca-2012-21.cer', import.meta.url),
+);
+/** Inside the signer certificate's validity (2026-09-10 .. 2026-10-28). */
+const NOW = Date.parse('2026-10-01T00:00:00Z');
 
 const FROM = 'from-box';
 const TO = 'to-box';
@@ -54,10 +66,14 @@ function padded(size: number): Buffer {
 }
 
 class FakeSigner implements Signer {
+  certificate = SIGNER_CERT;
   signed: Buffer[] = [];
   verified: { data: Buffer; signature: Buffer }[] = [];
   signResult: SignResult | Error = { signature: DER_SIGNATURE };
-  verifyResult: VerifyResult | Error = { valid: true, signers: [{ valid: true }] };
+  verifyResult: VerifyResult | Error = {
+    valid: true,
+    signers: [{ valid: true, mathValid: true, thumbprint: THUMBPRINT, detached: true }],
+  };
 
   sign(data: Buffer): Promise<SignResult> {
     this.signed.push(data);
@@ -136,7 +152,7 @@ function settle<T>(value: T | Error): Promise<T> {
 function setup(options: Partial<SendUtdOptions> = {}) {
   const signer = new FakeSigner();
   const diadoc = new FakeDiadoc();
-  let clock = 1_000_000;
+  let clock = NOW;
   const slept: number[] = [];
   const logs: string[] = [];
   const run = (input: SendUtdInput = { fileName: FILE_NAME, content: CONTENT }) =>
@@ -276,7 +292,9 @@ describe('sendUtd operationId', () => {
   it('is the same on a retry of the same document, although the signature changes', async () => {
     const first = setup();
     const second = setup();
-    second.signer.signResult = { signature: Buffer.from([0x30, 0x02, 0x05, 0x00]) };
+    const resigned = Buffer.from(DER_SIGNATURE);
+    resigned[resigned.length - 1] = (resigned.at(-1) ?? 0) ^ 0xff; // another signature value
+    second.signer.signResult = { signature: resigned };
     await first.run();
     await second.run();
     expect(second.diadoc.posts[0]?.options.operationId).toBe(
@@ -317,10 +335,79 @@ describe('sendUtd failures before sending', () => {
 
   it('fails fast when the signature does not verify', async () => {
     const { signer, diadoc, run } = setup();
-    signer.verifyResult = { valid: false, signers: [], reason: 'chain' };
+    signer.verifyResult = { valid: false, signers: [], reason: 'no signatures in CMS' };
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'SIGNATURE_INVALID', step: 'verify' });
-    expect(error.message).toMatch(/chain/);
+    expect(error.message).toMatch(/no signatures in CMS/);
+    expect(diadoc.calls).toHaveLength(0);
+  });
+
+  it('tells broken signature math from a certificate or chain problem', async () => {
+    const math = setup();
+    math.signer.verifyResult = {
+      valid: false,
+      signers: [{ valid: false, mathValid: false, chainValid: true }],
+      reason: 'bad',
+    };
+    const mathError = await failure(math.run());
+    expect(mathError).toMatchObject({ code: 'SIGNATURE_INVALID', step: 'verify' });
+    expect(mathError.message).toMatch(/math is invalid/);
+    expect(mathError.details).toEqual([{ valid: false, mathValid: false, chainValid: true }]);
+
+    const chain = setup();
+    chain.signer.verifyResult = {
+      valid: false,
+      signers: [{ valid: false, mathValid: true, chainValid: false }],
+      reason: 'untrusted root',
+    };
+    const chainError = await failure(chain.run());
+    expect(chainError).toMatchObject({ code: 'CERTIFICATE_INVALID', step: 'verify' });
+    expect(chainError.message).toMatch(/math is valid.*chain.*untrusted root.*2026-10-28/);
+    expect(chain.diadoc.calls).toHaveLength(0);
+  });
+
+  it('refuses to sign with an expired signer certificate, naming the expiry date', async () => {
+    const signer = new FakeSigner();
+    const diadoc = new FakeDiadoc();
+    const error = await failure(
+      sendUtd(
+        { fileName: FILE_NAME, content: CONTENT },
+        { signer, diadoc, now: () => Date.parse('2026-10-28T12:32:12Z') },
+        { fromBoxId: FROM, toBoxId: TO },
+      ),
+    );
+    expect(error).toMatchObject({ code: 'CERTIFICATE_INVALID', step: 'sign' });
+    expect(error.message).toContain(`${THUMBPRINT} expired on 2026-10-28T12:32:11.000Z`);
+    expect(signer.signed).toHaveLength(0);
+    expect(diadoc.calls).toHaveLength(0);
+  });
+
+  it('rejects an unreadable signer certificate before signing', async () => {
+    const { signer, run } = setup();
+    signer.certificate = Buffer.from([0x30, 0x00]);
+    expect(await failure(run())).toMatchObject({ code: 'CERTIFICATE_INVALID', step: 'sign' });
+    expect(signer.signed).toHaveLength(0);
+  });
+
+  it('rejects a signature made by another certificate before verifying it', async () => {
+    const { signer, diadoc, run } = setup();
+    signer.certificate = OTHER_CERT; // the КриптоПро test CA: valid now, but not the CMS signer
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'SIGNATURE_POLICY_VIOLATION', step: 'policy' });
+    expect(error.message).toMatch(/not by the configured certificate/);
+    expect(signer.verified).toHaveLength(0);
+    expect(diadoc.calls).toHaveLength(0);
+  });
+
+  it('rejects a verified signature when the verifier reports another signer', async () => {
+    const { signer, diadoc, run } = setup();
+    signer.verifyResult = {
+      valid: true,
+      signers: [{ valid: true, mathValid: true, thumbprint: 'ffff' }],
+    };
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'SIGNATURE_POLICY_VIOLATION', step: 'verify' });
+    expect(error.message).toMatch(/thumbprint ffff, expected 0e84/);
     expect(diadoc.calls).toHaveLength(0);
   });
 
@@ -335,7 +422,8 @@ describe('sendUtd failures before sending', () => {
     const { signer, diadoc, run } = setup();
     signer.signResult = { signature: BER_SIGNATURE };
     const error = await failure(run());
-    expect(error).toMatchObject({ code: 'INVALID_SIGNATURE', step: 'attach' });
+    expect(error).toMatchObject({ code: 'INVALID_SIGNATURE', step: 'policy' });
+    expect(signer.verified).toHaveLength(0);
     expect(diadoc.calls).toHaveLength(0);
   });
 
@@ -530,7 +618,7 @@ describe('sendUtd status polling', () => {
     const cause = new Error('timer broke');
     const result = await sendUtd(
       { fileName: FILE_NAME, content: CONTENT },
-      { signer, diadoc, sleep: () => Promise.reject(cause) },
+      { signer, diadoc, now: () => NOW, sleep: () => Promise.reject(cause) },
       { fromBoxId: FROM, toBoxId: TO },
     );
     expect(result).toMatchObject({ messageId: 'msg-1', polls: 1, statusError: cause });
@@ -546,6 +634,7 @@ describe('sendUtd status polling', () => {
       {
         signer,
         diadoc,
+        now: () => NOW,
         sleep: () => {
           controller.abort(new Error('stop'));
           return Promise.reject(new Error('aborted'));

@@ -21,8 +21,12 @@ const SIGNED_DATA_OID = Buffer.from('06092a864886f70d010702', 'hex');
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 /** Visible ASCII only: anything else is rejected by fetch with the value in the message. */
 const HEADER_TOKEN = /^[\x21-\x7e]+$/;
-/** КриптоАРМ Server 400 text when the certificate's key is not in `uMy` (seen 2026-09-24). */
-const KEY_NOT_FOUND = /закрытый ключ[^.]*не найден/i;
+/**
+ * КриптоАРМ Server 400 text when the certificate's key is not in `uMy` (seen 2026-09-24:
+ * «Закрытый ключ для переданного сертификата не найден в хранилище КриптоПро. …»). Loose on
+ * purpose: the text between the two phrases may name the certificate (dots, line breaks).
+ */
+const KEY_NOT_FOUND = /закрытый ключ.*не найден/is;
 
 export interface ServerCmsSignerOptions {
   /** КриптоАРМ Server base URL, e.g. `http://127.0.0.1:3037`. A path prefix is kept. */
@@ -39,6 +43,8 @@ export interface ServerCmsSignerOptions {
 
 /** Signs via КриптоАРМ Server `POST /cms/sign` (detached CAdES-BES) and verifies via `/cms/verify`. */
 export class ServerCmsSigner implements Signer {
+  /** The configured public certificate (DER); every signature must be made by its key. */
+  readonly certificate: Buffer;
   readonly #baseUrl: URL;
   readonly #certificate: string;
   readonly #apiKey: string | undefined;
@@ -47,7 +53,8 @@ export class ServerCmsSigner implements Signer {
 
   constructor(options: ServerCmsSignerOptions) {
     this.#baseUrl = parseBaseUrl(options.baseUrl);
-    this.#certificate = toDerCertificate(options.certificate).toString('base64');
+    this.certificate = toDerCertificate(options.certificate);
+    this.#certificate = this.certificate.toString('base64');
     if (options.apiKey !== undefined && !HEADER_TOKEN.test(options.apiKey)) {
       throw new SignerConfigError('apiKey must be non-empty visible ASCII without spaces');
     }
@@ -247,8 +254,11 @@ function toSignerInfo(sign: Record<string, unknown>): SignerInfo {
   if (typeof certificate.subjectName === 'string') info.subject = certificate.subjectName;
   if (typeof certificate.thumbprint === 'string') info.thumbprint = certificate.thumbprint;
   if (typeof sign.signingTime === 'string') info.signingTime = sign.signingTime;
+  if (typeof certificate.notAfter === 'string') info.notAfter = certificate.notAfter;
   if (typeof ext.mathValidity === 'boolean') info.mathValid = ext.mathValidity;
   if (typeof sign.isCertChainValid === 'boolean') info.chainValid = sign.isCertChainValid;
+  if (typeof sign.isCertValid === 'boolean') info.certValid = sign.isCertValid;
+  if (typeof sign.isDetached === 'boolean') info.detached = sign.isDetached;
   return info;
 }
 

@@ -1,4 +1,5 @@
-export type PipelineStep = 'parse' | 'sign' | 'verify' | 'attach' | 'precheck' | 'upload' | 'post';
+export type PipelineStep =
+  'parse' | 'sign' | 'policy' | 'verify' | 'attach' | 'precheck' | 'upload' | 'post';
 
 export type PipelineErrorCode =
   /** УПД rejected by parseUtd (see `cause`: UtdError). Fix the document. */
@@ -8,9 +9,23 @@ export type PipelineErrorCode =
   | 'SIGN_FAILED'
   /** The verify call itself failed (network, HTTP). */
   | 'VERIFY_FAILED'
-  /** The signer's own signature does not verify over the exact bytes. */
+  /**
+   * The signer's own signature does not verify over the exact bytes: the signature math is broken
+   * (or the verifier did not say why). A signer bug or tampering; see `details` (SignerInfo[]).
+   */
   | 'SIGNATURE_INVALID'
-  /** The signer returned something that is not a DER CMS. */
+  /**
+   * The signer certificate is unusable: unreadable, outside its validity period (checked before
+   * signing), or the math verifies but the certificate or its chain does not (expired, revoked, CA
+   * root missing on the server). Needs a new certificate or the CA chain installed, not a retry.
+   */
+  | 'CERTIFICATE_INVALID'
+  /**
+   * The signature breaks the pipeline policy: not detached, not exactly one signer, or not made by
+   * the configured certificate (thumbprint mismatch).
+   */
+  | 'SIGNATURE_POLICY_VIOLATION'
+  /** The signer returned something that is not a DER CMS SignedData. */
   | 'INVALID_SIGNATURE'
   /** CanPostMessage reported blocking errors (`details`). */
   | 'PRECHECK_REJECTED'

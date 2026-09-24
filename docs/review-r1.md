@@ -52,7 +52,7 @@ How it was checked:
   - Reject symlinks, or resolve them with `realpath`, in `checkTokenFileWritable`.
   - Take an `O_EXCL` lock file for the duration of the run.
 
-### M5. The verify step does not check *who* signed or that the CMS is detached
+### M5. The verify step does not check *who* signed or that the CMS is detached — **fixed in F5**
 - Where: `src/signer/server-cms-signer.ts:106-133` (`valid` = `isValidSign` && every signer valid) and `server-cms-signer.ts:217-222` (`isCmsSignedData` checks only the OID).
 - Scenario: a future signer (T7 `DocumentsCloudSigner`) or a server change returns an attached CMS, a second signer, or a signature by another key in the store. Verify still reports `valid`, and it is posted.
 - Today the detached property is asserted only in the integration test (`signature.includes(marker) === false`).
@@ -61,7 +61,7 @@ How it was checked:
   - the signer's thumbprint equals the thumbprint of `SIGNER_CERT_PATH`;
   - no `eContent` in `encapContentInfo`.
 
-### M6. The pipeline requires a valid chain; the only signing cert expires 2026-10-28
+### M6. The pipeline requires a valid chain; the only signing cert expires 2026-10-28 — **message part fixed in F5** (`CERTIFICATE_INVALID` vs `SIGNATURE_INVALID`, expiry date checked before signing); I3 still open
 - Where: `src/signer/server-cms-signer.ts:124` and `src/pipeline/send.ts:142`. `isValidSign` includes chain validation; `mathValid` is informational only.
 - Scenario: from 2026-10-28 (about 5 weeks away), or on a stand without the test CA root, every `send` fails with `SIGNATURE_INVALID` even though the signature is mathematically correct. The cause is visible only inside `details`.
 - Being strict is the right policy. Two gaps remain:
@@ -120,7 +120,7 @@ How it was checked:
     - `send.ts:299` prints `error.body` untruncated, unlike `DiadocError.message`, which is cut to 1000 characters.
 12. **Extension case changes `operationId`.** — **(run)** `parseUtd` accepts `.XML` (`src/utd/parse.ts:59`, `/i`). The full `fileName` goes into `operationIdFor` (`send.ts:113`), so renaming `X.xml` to `X.XML` yields a different key for the same bytes, i.e. a second send. Fix: hash `utd.idFile` instead, or require lowercase `.xml`.
 13. **`customDocumentId` is not part of `operationId`.** A repeat with a different `customDocumentId` reuses the key (`operation-id.ts:17`); the explicit resend belongs to T8.
-14. **`KEY_NOT_FOUND` is brittle.** `/закрытый ключ[^.]*не найден/i` (`server-cms-signer.ts:25`) misses a message whose CN contains a dot. Only the dot-free text has been seen live.
+14. **Fixed in F5.** **`KEY_NOT_FOUND` is brittle.** `/закрытый ключ[^.]*не найден/i` (`server-cms-signer.ts:25`) misses a message whose CN contains a dot. Only the dot-free text has been seen live.
 15. **The shelf path lacks an automated test on the signer side.** The pipeline signs up to 3 000 000 B inline as base64 JSON. Checked manually on the stand today **(run)**:
     - `/cms/sign` of 600 000 B and of 2 900 000 B → 201 (about 8 s);
     - `/cms/verify` of 2.9 MB → `isValidSign: true`.
@@ -136,7 +136,7 @@ How it was checked:
 - `docs/plan.md`: T3, F2 and T5 still say "branch …, not merged"; they are merged (`a6b492b`, `e3619b8`, `98e17c4`).
 - `docs/research.md:41` says "`ServerCmsSigner` accepts it as is; whether Диадок accepts BER … is checked in S1/T6". This is stale after F2 (DER normalisation; D1 is moot).
 - `docs/research.md:42` lists `CRYPTOPRO_LICENSE` as required; `CLAUDE.md` and the README say empty = Demo trial.
-- `CLAUDE.md`: "exit 1 failed (stderr has `[CODE]` from `PipelineError`)". Config and env failures (`SignerConfigError`, `DiadocConfigError`, `PipelineConfigError`, the token-file check) print `error: …` without a code (`src/cli.ts:171-180`).
+- **Fixed in F5.** `CLAUDE.md`: "exit 1 failed (stderr has `[CODE]` from `PipelineError`)". Config and env failures (`SignerConfigError`, `DiadocConfigError`, `PipelineConfigError`, the token-file check) print `error: …` without a code (`src/cli.ts:171-180`).
 - The root `.env.example` has `CRYPTOARM_SERVER_API_KEY=changeme` and `SIGNER_CERT_PATH=./certs/signer.cer` (no such file), while the stand has `API_KEYS=change-me-api-key` and `CLAUDE.md` uses `docker/cryptoarm-server/certs/cryptoarm.server.test.cer`. Copying both examples as is gives a 401 / ENOENT.
 
 ## Proposed follow-up tasks
