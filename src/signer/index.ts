@@ -21,8 +21,10 @@ export {
 export {
   DEFAULT_DOCUMENTS_TIMEOUT_MS,
   DocumentsCloudSigner,
+  VERIFY_SIGNATURE_MARGIN_BYTES,
   type DocumentsAuth,
   type DocumentsCloudSignerOptions,
+  type DocumentsVerifier,
 } from './documents-cloud-signer.js';
 export {
   createSignerFromEnv,

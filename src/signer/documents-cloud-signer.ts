@@ -16,6 +16,7 @@ import {
   SignerHttpError,
   SignerKeyNotFoundError,
   SignerNetworkError,
+  SignerPayloadTooLargeError,
   SignerResponseError,
   SignerTimeoutError,
 } from './errors.js';
@@ -23,6 +24,13 @@ import { HEADER_TOKEN, isRecord, parseBaseUrl, toDerSignature, validateTimeout }
 import type { SignResult, Signer, SignerCallOptions, VerifyResult } from './signer.js';
 
 export const DEFAULT_DOCUMENTS_TIMEOUT_MS = 120_000;
+/**
+ * Room kept for the signature in the `/cms/verify` body when sizing data before the upload (D50):
+ * КриптоАРМ Server's detached CAdES-BES with one certificate is ≈ 2.2 KB.
+ */
+export const VERIFY_SIGNATURE_MARGIN_BYTES = 16_384;
+/** `{"cms":"","data":""}`: the verify body without its two Base64 values. */
+const VERIFY_BODY_OVERHEAD = 20;
 /** Lifetime asked of `GET /api/v1/auth/jwt` for a login session: short, renewed as needed. */
 const LOGIN_JWT_EXPIRES_IN = '15m';
 /** Renew a login JWT this long before it expires. */
@@ -37,6 +45,13 @@ const MIME_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 const NO_CORPORATE_CERT = /не удалось получить корпоративный сертификат/i;
 /** КриптоАРМ Server's «Закрытый ключ … не найден», if Документы relays it (status unverified). */
 const KEY_NOT_FOUND = /закрытый ключ.*не найден/is;
+/**
+ * КриптоАРМ Server's body-parser text; `cloud-sign` relays it as `400 «Ошибка облачной подписи:
+ * request entity too large»` (measured on I2, F14).
+ */
+const TOO_LARGE = /request entity too large/i;
+/** `cloud-sign` 400 when this user already signed the document (I2). */
+const ALREADY_SIGNED = /повторная подпись/i;
 
 /**
  * `jwt`: a Bearer token issued beforehand (`GET /api/v1/auth/jwt` of the service user), used as
@@ -60,7 +75,7 @@ export interface DocumentsCloudSignerOptions {
    * Документы signs with. Документы itself offers no usable verify: `/documents/{id}/verify` is a
    * PDF (D10) and a signature that fails its check on upload is deleted without details.
    */
-  verifier: Pick<Signer, 'verify'>;
+  verifier: DocumentsVerifier;
   /** MIME type of the upload part; must match the service's `ALLOWED_FILE_TYPES`. */
   uploadContentType?: string;
   /** Per-request timeout; default 120 s. */
@@ -72,6 +87,12 @@ export interface DocumentsCloudSignerOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
 }
+
+/**
+ * `maxRequestBytes`: the verifier's JSON body limit (`ServerCmsSigner`), checked before the upload
+ * so that data too large to verify is not uploaded and signed first (D50).
+ */
+export type DocumentsVerifier = Pick<Signer, 'verify'> & { readonly maxRequestBytes?: number };
 
 type Step = 'login' | 'jwt' | 'upload' | 'cloud-sign' | 'export';
 
@@ -87,7 +108,7 @@ export class DocumentsCloudSigner implements Signer {
   readonly certificate: Buffer;
   readonly #baseUrl: URL;
   readonly #auth: DocumentsAuth;
-  readonly #verifier: Pick<Signer, 'verify'>;
+  readonly #verifier: DocumentsVerifier;
   readonly #uploadContentType: string;
   readonly #timeoutMs: number;
   readonly #retry: Readonly<RetryPolicy>;
@@ -101,6 +122,12 @@ export class DocumentsCloudSigner implements Signer {
     this.certificate = toDerCertificate(options.certificate);
     this.#auth = validateAuth(options.auth);
     this.#verifier = options.verifier;
+    const limit = options.verifier.maxRequestBytes;
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) {
+      throw new SignerConfigError(
+        `verifier maxRequestBytes must be a positive integer, got ${String(limit)}`,
+      );
+    }
     this.#uploadContentType = options.uploadContentType ?? 'application/octet-stream';
     if (!MIME_TYPE.test(this.#uploadContentType)) {
       throw new SignerConfigError(
@@ -128,6 +155,7 @@ export class DocumentsCloudSigner implements Signer {
     if (data.length === 0) throw new SignerError('sign: data must not be empty');
     const { signal } = options;
     signal?.throwIfAborted();
+    this.#checkSize(data.length);
 
     const uploaded = await this.#json('upload', 'api/v1/documents/upload', {
       method: 'POST',
@@ -138,6 +166,7 @@ export class DocumentsCloudSigner implements Signer {
         return form;
       },
       idempotent: true,
+      size: data.length,
       signal,
     });
     const documentId =
@@ -151,6 +180,7 @@ export class DocumentsCloudSigner implements Signer {
         method: 'POST',
         json: {},
         idempotent: true,
+        size: data.length,
         signal,
       },
     );
@@ -184,6 +214,34 @@ export class DocumentsCloudSigner implements Signer {
     return this.#verifier.verify(data, signature, options);
   }
 
+  /**
+   * D50: `cloud-sign` makes Документы post the data as Base64 JSON to КриптоАРМ Server `/cms/sign`,
+   * and `verify` posts it again with the signature to `/cms/verify` — both under the server's
+   * `JSON_LIMIT`. The verify body is the larger one, so data it cannot carry is refused here,
+   * before anything is uploaded or signed.
+   */
+  #checkSize(dataBytes: number): void {
+    const limit = this.#verifier.maxRequestBytes;
+    if (limit === undefined) return;
+    const verifyBytes = (n: number) =>
+      VERIFY_BODY_OVERHEAD + base64Length(VERIFY_SIGNATURE_MARGIN_BYTES) + base64Length(n);
+    const requestBytes = verifyBytes(dataBytes);
+    if (requestBytes <= limit) return;
+    const room = limit - verifyBytes(0);
+    const fits = room < 4 ? 0 : 3 * Math.floor(room / 4);
+    throw new SignerPayloadTooLargeError(
+      'sign',
+      requestBytes,
+      limit,
+      undefined,
+      `data of ${String(dataBytes)} B is too large: its /cms/verify body on КриптоАРМ Server would be ` +
+        `${String(requestBytes)} B (Base64, with ${String(VERIFY_SIGNATURE_MARGIN_BYTES)} B kept for the signature), ` +
+        `over the verifier limit of ${String(limit)} B (server JSON_LIMIT / CRYPTOARM_SERVER_MAX_REQUEST_BYTES; ` +
+        `cloud-sign posts the same data to /cms/sign under that limit); files up to ${String(fits)} B fit; ` +
+        `nothing uploaded to КриптоАРМ Документы`,
+    );
+  }
+
   async #json(step: Step, path: string, request: Request): Promise<unknown> {
     const response = await this.#call(step, path, request);
     const text = await this.#read(step, response, (r) => r.text(), request.signal);
@@ -201,7 +259,7 @@ export class DocumentsCloudSigner implements Signer {
   async #call(step: Step, path: string, request: Request): Promise<Response> {
     for (let attempt = 1; ; attempt++) {
       const token = await this.#currentToken(request.signal);
-      const sent = await this.#send(path, request, {
+      const sent = await this.#send(step, path, request, {
         authorization: `Bearer ${token.value}`,
       });
       const { response } = sent;
@@ -213,7 +271,7 @@ export class DocumentsCloudSigner implements Signer {
         if (value === token && this.#token === current) this.#token = undefined;
         continue;
       }
-      return this.#ok(step, sent);
+      return this.#ok(step, sent, request.size);
     }
   }
 
@@ -237,7 +295,7 @@ export class DocumentsCloudSigner implements Signer {
     const { login, password } = this.#auth;
     const session = await this.#ok(
       'login',
-      await this.#send('api/v1/login', {
+      await this.#send('login', 'api/v1/login', {
         method: 'POST',
         json: { username: login, password },
         signal,
@@ -254,7 +312,7 @@ export class DocumentsCloudSigner implements Signer {
     const path = `api/v1/auth/jwt?expiresIn=${LOGIN_JWT_EXPIRES_IN}`;
     const response = await this.#ok(
       'jwt',
-      await this.#send(path, { method: 'GET', signal }, { cookie }),
+      await this.#send('jwt', path, { method: 'GET', signal }, { cookie }),
     );
     const text = await this.#read('jwt', response, (r) => r.text(), signal);
     let body: unknown;
@@ -281,6 +339,7 @@ export class DocumentsCloudSigner implements Signer {
    * identical request is repeated: same Idempotency-Key, new X-Request-Id per attempt.
    */
   async #send(
+    step: Step,
     path: string,
     request: Request,
     extraHeaders: Record<string, string> = {},
@@ -320,7 +379,7 @@ export class DocumentsCloudSigner implements Signer {
       );
       return { response, requestId };
     } catch (error) {
-      throw this.#fetchError(error, callerSignal);
+      throw this.#fetchError(step, error, callerSignal);
     }
   }
 
@@ -335,30 +394,48 @@ export class DocumentsCloudSigner implements Signer {
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
       if (error instanceof SignerError) throw error;
+      // The per-request timeout also covers the body: a stalled body fails with its reason.
+      if (isTimeout(error)) throw new SignerTimeoutError('sign', this.#timeoutMs, step, true);
       throw new SignerNetworkError('sign', {
-        cause: new Error(`${step}: reading the response failed`, { cause: error }),
+        cause: error,
+        step,
+        what: 'reading the response failed',
       });
     }
   }
 
-  #fetchError(error: unknown, signal: AbortSignal | undefined): unknown {
+  #fetchError(step: Step, error: unknown, signal: AbortSignal | undefined): unknown {
     if (signal?.aborted) return signal.reason;
-    if (error instanceof DOMException && error.name === 'TimeoutError') {
-      return new SignerTimeoutError('sign', this.#timeoutMs);
-    }
+    if (isTimeout(error)) return new SignerTimeoutError('sign', this.#timeoutMs, step);
     if (error instanceof TypeError || isTransientFetchError(error)) {
-      return new SignerNetworkError('sign', { cause: error });
+      return new SignerNetworkError('sign', { cause: error, step });
     }
     return error;
   }
 
-  /** Passes a 2xx response through; maps anything else to SignerHttpError. */
-  async #ok(step: Step, { response, requestId: sentId }: Sent): Promise<Response> {
+  /**
+   * Passes a 2xx response through; maps anything else to SignerHttpError, or to
+   * SignerPayloadTooLargeError when the upload or `cloud-sign` of `size` bytes is too large.
+   */
+  async #ok(step: Step, { response, requestId: sentId }: Sent, size?: number): Promise<Response> {
     if (response.ok) return response;
     const text = await response.text().catch(() => '');
     const message = `${step}: ${upstreamMessage(text)}`;
     // The service echoes the X-Request-Id it was sent; a proxy error page may not.
     const requestId = response.headers.get('x-request-id') ?? sentId;
+    const { status } = response;
+    if (size !== undefined) this.#checkTooLarge(step, status, message, requestId, size, text);
+    if (step === 'cloud-sign' && status === 400 && ALREADY_SIGNED.test(message)) {
+      throw new SignerHttpError(
+        'sign',
+        status,
+        message,
+        requestId,
+        'each signing uploads a new document, so an earlier attempt of this cloud-sign has probably ' +
+          'stored the signature (a repeat after a timeout or a 5xx runs again, D15); run again: it ' +
+          'uploads the file anew and signs it once more',
+      );
+    }
     const HttpError =
       response.status >= 400 &&
       response.status < 500 &&
@@ -366,6 +443,44 @@ export class DocumentsCloudSigner implements Signer {
         ? SignerKeyNotFoundError
         : SignerHttpError;
     throw new HttpError('sign', response.status, message, requestId);
+  }
+
+  /** D50: the Документы upload limit, and КриптоАРМ Server's `JSON_LIMIT` relayed by `cloud-sign`. */
+  #checkTooLarge(
+    step: Step,
+    status: number,
+    message: string,
+    requestId: string,
+    size: number,
+    text: string,
+  ): void {
+    const response = { status, upstreamMessage: message, requestId };
+    const answer =
+      `(HTTP ${String(status)}: ${message})` + (requestId ? ` (request id ${requestId})` : '');
+    if (step === 'upload' && status === 413) {
+      const limit = maxFileSizeBytes(text);
+      throw new SignerPayloadTooLargeError(
+        'sign',
+        size,
+        limit,
+        response,
+        `upload of ${String(size)} B rejected as too large by КриптоАРМ Документы ${answer}; ` +
+          (limit === undefined ? '' : `its limit is ${String(limit)} B; `) +
+          `the service takes files smaller than MAX_FILE_SIZE MiB, a proxy in front of it may have its own limit`,
+      );
+    }
+    if (step === 'cloud-sign' && (status === 400 || status === 413) && TOO_LARGE.test(message)) {
+      throw new SignerPayloadTooLargeError(
+        'sign',
+        size,
+        // The server's JSON_LIMIT is not known here: the verifier's limit evidently exceeds it.
+        undefined,
+        response,
+        `cloud-sign of ${String(size)} B rejected as too large ${answer}: Документы posts the file ` +
+          `as Base64 JSON to КриптоАРМ Server /cms/sign, which refuses bodies over its JSON_LIMIT ` +
+          `(files up to about 3/4 of it fit); the uploaded document stays in Документы unsigned`,
+      );
+    }
   }
 }
 
@@ -382,6 +497,8 @@ interface Request {
   body?: () => FormData;
   /** Send an Idempotency-Key (the same one on every repeat). */
   idempotent?: boolean;
+  /** Bytes of the file this request carries (upload, cloud-sign), for "too large" errors. */
+  size?: number;
   signal: AbortSignal | undefined;
 }
 
@@ -395,6 +512,31 @@ function validateAuth(auth: DocumentsAuth): DocumentsAuth {
   if (auth.login === '') throw new SignerConfigError('Документы login must not be empty');
   if (auth.password === '') throw new SignerConfigError('Документы password must not be empty');
   return { login: auth.login, password: auth.password };
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'TimeoutError';
+}
+
+function base64Length(bytes: number): number {
+  return 4 * Math.ceil(bytes / 3);
+}
+
+/** `error.details.maxFileSizeBytes` of the Документы upload pre-check 413, if present. */
+function maxFileSizeBytes(text: string): number | undefined {
+  try {
+    const body: unknown = JSON.parse(text);
+    const details =
+      isRecord(body) && isRecord(body.error) && isRecord(body.error.details)
+        ? body.error.details
+        : undefined;
+    const value = details?.maxFileSizeBytes;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isId(value: unknown): value is number {

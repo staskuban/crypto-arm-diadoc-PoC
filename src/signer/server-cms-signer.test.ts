@@ -377,6 +377,47 @@ describe('ServerCmsSigner.sign', () => {
     expect(error).toBeInstanceOf(SignerNetworkError);
     expect((error as Error).cause).toBe(cause);
   });
+
+  it('puts the root cause of a network failure into the message', async () => {
+    const cause = new TypeError('fetch failed', {
+      cause: new Error('getaddrinfo ENOTFOUND server.test'),
+    });
+    const { signer } = setup(() => Promise.reject(cause));
+    const error = await signer.verify(data, cmsDer).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerNetworkError);
+    expect((error as Error).message).toBe(
+      'verify: request failed: fetch failed: getaddrinfo ENOTFOUND server.test',
+    );
+  });
+
+  it('tells a refused redirect apart from a refused connection', async () => {
+    const cause = new TypeError('fetch failed', { cause: new Error('unexpected redirect') });
+    const { signer } = setup(() => Promise.reject(cause));
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect((error as Error).message).toBe(
+      'sign: request failed: fetch failed: unexpected redirect',
+    );
+  });
+
+  it('names a failed body read and its root cause', async () => {
+    const closed = new TypeError('terminated', { cause: new Error('other side closed') });
+    const { signer } = setup(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(closed);
+          },
+        }),
+        { status: 201 },
+      ),
+    );
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerNetworkError);
+    expect((error as Error).cause).toBe(closed);
+    expect((error as Error).message).toBe(
+      'sign: reading the response failed: terminated: other side closed',
+    );
+  });
 });
 
 describe('ServerCmsSigner.verify', () => {
@@ -603,6 +644,11 @@ describe('ServerCmsSigner request size limit', () => {
       operation: 'verify',
       status: 413,
     });
+  });
+
+  it('exposes its limit so DocumentsCloudSigner can check the size before uploading (D50)', () => {
+    expect(setup(ok).signer.maxRequestBytes).toBe(DEFAULT_MAX_REQUEST_BYTES);
+    expect(setup(ok, { maxRequestBytes: 1000 }).signer.maxRequestBytes).toBe(1000);
   });
 
   it.each([0, -1, 1.5, Number.NaN])('rejects maxRequestBytes %s', (maxRequestBytes) => {

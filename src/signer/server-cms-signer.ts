@@ -55,11 +55,12 @@ export interface ServerCmsSignerOptions {
 export class ServerCmsSigner implements Signer {
   /** The configured public certificate (DER); every signature must be made by its key. */
   readonly certificate: Buffer;
+  /** Largest JSON request body sent (the server `JSON_LIMIT`); `DocumentsCloudSigner` checks it too (D50). */
+  readonly maxRequestBytes: number;
   readonly #baseUrl: URL;
   readonly #certificate: string;
   readonly #apiKey: string | undefined;
   readonly #timeoutMs: number;
-  readonly #maxRequestBytes: number;
   readonly #fetch: typeof fetch;
 
   constructor(options: ServerCmsSignerOptions) {
@@ -71,10 +72,10 @@ export class ServerCmsSigner implements Signer {
     }
     this.#apiKey = options.apiKey;
     this.#timeoutMs = validateTimeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    this.#maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
-    if (!Number.isSafeInteger(this.#maxRequestBytes) || this.#maxRequestBytes <= 0) {
+    this.maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+    if (!Number.isSafeInteger(this.maxRequestBytes) || this.maxRequestBytes <= 0) {
       throw new SignerConfigError(
-        `maxRequestBytes must be a positive integer, got ${String(this.#maxRequestBytes)}`,
+        `maxRequestBytes must be a positive integer, got ${String(this.maxRequestBytes)}`,
       );
     }
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -151,8 +152,8 @@ export class ServerCmsSigner implements Signer {
     for (const value of Object.values(payload)) {
       if (Buffer.isBuffer(value)) requestBytes += 4 * Math.ceil(value.length / 3);
     }
-    if (requestBytes > this.#maxRequestBytes) {
-      throw new SignerPayloadTooLargeError(operation, requestBytes, this.#maxRequestBytes);
+    if (requestBytes > this.maxRequestBytes) {
+      throw new SignerPayloadTooLargeError(operation, requestBytes, this.maxRequestBytes);
     }
     const body = encode((value) => value.toString('base64'));
 
@@ -166,6 +167,7 @@ export class ServerCmsSigner implements Signer {
 
     let response: Response;
     let text: string;
+    let what = 'request failed';
     try {
       response = await this.#fetch(new URL(path, this.#baseUrl), {
         method: 'POST',
@@ -175,20 +177,21 @@ export class ServerCmsSigner implements Signer {
         // Never follow redirects: X-API-Key would be forwarded to the new host and POST turned into GET.
         redirect: 'error',
       });
+      what = 'reading the response failed';
       text = await response.text();
     } catch (error) {
       if (callerSignal?.aborted) throw callerSignal.reason;
       if (timeout.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
         throw new SignerTimeoutError(operation, this.#timeoutMs);
       }
-      throw new SignerNetworkError(operation, { cause: error });
+      throw new SignerNetworkError(operation, { cause: error, what });
     }
 
     if (!response.ok) {
       const message = upstreamMessage(text);
       const requestId = response.headers.get('x-request-id') ?? undefined;
       if (response.status === 413 || (response.status === 400 && TOO_LARGE.test(message))) {
-        throw new SignerPayloadTooLargeError(operation, requestBytes, this.#maxRequestBytes, {
+        throw new SignerPayloadTooLargeError(operation, requestBytes, this.maxRequestBytes, {
           status: response.status,
           upstreamMessage: message,
           requestId,

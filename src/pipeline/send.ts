@@ -418,6 +418,9 @@ function describeValidation(e: MessageValidationError): string {
 function describe(error: unknown): string {
   if (error instanceof UtdError) return `${error.code}: ${error.message}`;
   if (!(error instanceof Error)) return String(error);
-  // fetch() hides the useful part (ECONNREFUSED, DNS, TLS) in `cause`.
-  return error.cause instanceof Error ? `${error.message}: ${error.cause.message}` : error.message;
+  // fetch() hides the useful part (ECONNREFUSED, DNS, TLS) in `cause`; signer errors already
+  // carry the whole cause chain in their message.
+  return error.cause instanceof Error && !error.message.includes(error.cause.message)
+    ? `${error.message}: ${error.cause.message}`
+    : error.message;
 }

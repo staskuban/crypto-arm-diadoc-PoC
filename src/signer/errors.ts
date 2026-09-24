@@ -20,10 +20,13 @@ export class SignerHttpError extends SignerError {
     /** Message reported by the service (NestJS `message`), or the raw body text. */
     readonly upstreamMessage: string,
     readonly requestId?: string,
+    /** What the operator should know about this answer, appended to the message. */
+    hint?: string,
   ) {
     super(
       `${operation}: HTTP ${String(status)}${upstreamMessage ? `: ${upstreamMessage}` : ''}` +
-        (requestId ? ` (request id ${requestId})` : ''),
+        (requestId ? ` (request id ${requestId})` : '') +
+        (hint ? `; ${hint}` : ''),
     );
   }
 }
@@ -40,35 +43,46 @@ export class SignerKeyNotFoundError extends SignerHttpError {
 }
 
 /**
- * The JSON request body is over the КриптоАРМ Server body limit (`JSON_LIMIT`, default `50mb` =
- * 52 428 800 B). Raised before sending when the body exceeds `maxRequestBytes` (`status` is then
- * undefined), or when the server rejects it anyway: the stand answers HTTP 400 «request entity
- * too large», a plain body-parser setup would answer 413. Retrying does not help.
+ * A request body is over a service limit; retrying does not help. КриптоАРМ Server: the JSON body is
+ * over `JSON_LIMIT` (default `50mb` = 52 428 800 B), refused before sending when it exceeds
+ * `maxRequestBytes` (`status` is then undefined), or rejected by the server anyway (the stand
+ * answers HTTP 400 «request entity too large», a plain body-parser setup 413). КриптоАРМ Документы
+ * (`DocumentsCloudSigner`, D50): the upload over `MAX_FILE_SIZE`, `cloud-sign` relaying the
+ * server's «too large», or data whose `/cms/verify` body would not fit the verifier's limit.
  */
 export class SignerPayloadTooLargeError extends SignerError {
   override name = 'SignerPayloadTooLargeError';
-  /** HTTP status when the server (or a proxy in front of it) rejected the body. */
+  /** HTTP status when the service (or a proxy in front of it) rejected the body. */
   readonly status: number | undefined;
   readonly upstreamMessage: string | undefined;
   readonly requestId: string | undefined;
 
   constructor(
     readonly operation: SignerOperation,
+    /**
+     * The JSON body that was too large; for a Документы upload or `cloud-sign` answer the file
+     * (Документы builds the server body itself).
+     */
     readonly requestBytes: number,
-    readonly limitBytes: number,
+    /** The limit `requestBytes` is measured against, when known. */
+    readonly limitBytes: number | undefined,
     response?: { status: number; upstreamMessage: string; requestId?: string | undefined },
+    /** Replaces the КриптоАРМ Server wording after `<operation>: `. */
+    detail?: string,
   ) {
     super(
-      response === undefined
-        ? `${operation}: request body of ${String(requestBytes)} B is too large for КриптоАРМ Server ` +
-            `(limit ${String(limitBytes)} B = server JSON_LIMIT / CRYPTOARM_SERVER_MAX_REQUEST_BYTES; ` +
-            `data travels as Base64, so files up to about 3/4 of it fit); not sent`
-        : `${operation}: request body of ${String(requestBytes)} B rejected as too large ` +
-            `(HTTP ${String(response.status)}${response.upstreamMessage ? `: ${response.upstreamMessage}` : ''})` +
-            (response.requestId ? ` (request id ${response.requestId})` : '') +
-            `; КриптоАРМ Server answers 400 over its JSON_LIMIT, a 413 usually comes from a proxy in front of it ` +
-            `(e.g. nginx client_max_body_size); keep CRYPTOARM_SERVER_MAX_REQUEST_BYTES (now ${String(limitBytes)} B) ` +
-            `at or below both`,
+      `${operation}: ` +
+        (detail ??
+          (response === undefined
+            ? `request body of ${String(requestBytes)} B is too large for КриптоАРМ Server ` +
+              `(limit ${String(limitBytes)} B = server JSON_LIMIT / CRYPTOARM_SERVER_MAX_REQUEST_BYTES; ` +
+              `data travels as Base64, so files up to about 3/4 of it fit); not sent`
+            : `request body of ${String(requestBytes)} B rejected as too large ` +
+              `(HTTP ${String(response.status)}${response.upstreamMessage ? `: ${response.upstreamMessage}` : ''})` +
+              (response.requestId ? ` (request id ${response.requestId})` : '') +
+              `; КриптоАРМ Server answers 400 over its JSON_LIMIT, a 413 usually comes from a proxy in front of it ` +
+              `(e.g. nginx client_max_body_size); keep CRYPTOARM_SERVER_MAX_REQUEST_BYTES (now ${String(limitBytes)} B) ` +
+              `at or below both`)),
     );
     this.status = response?.status;
     this.upstreamMessage = response?.upstreamMessage;
@@ -76,27 +90,53 @@ export class SignerPayloadTooLargeError extends SignerError {
   }
 }
 
-/** The request did not complete within the configured timeout. */
+/**
+ * The request, or reading its response body, did not complete within the configured timeout.
+ * `step` names the request of a multi-step operation (`DocumentsCloudSigner`: `upload`,
+ * `cloud-sign`, `export`, ...): after a `cloud-sign` timeout the signature may already be stored.
+ */
 export class SignerTimeoutError extends SignerError {
   override name = 'SignerTimeoutError';
 
   constructor(
     readonly operation: SignerOperation,
     readonly timeoutMs: number,
+    readonly step?: string,
+    /** The headers arrived, but the body did not complete in time. */
+    body = false,
   ) {
-    super(`${operation}: no response within ${String(timeoutMs)} ms`);
+    super(
+      `${operation}: ${step ? `${step}: ` : ''}` +
+        (body ? 'response body not complete' : 'no response') +
+        ` within ${String(timeoutMs)} ms`,
+    );
   }
 }
 
-/** The service could not be reached (DNS, connection refused, TLS, ...). */
+/**
+ * The service could not be reached (DNS, connection refused, TLS, a refused redirect, ...) or the
+ * connection broke while the response was read. The message carries the root cause, since fetch
+ * reports all of them as "fetch failed".
+ */
 export class SignerNetworkError extends SignerError {
   override name = 'SignerNetworkError';
+  readonly step: string | undefined;
 
   constructor(
     readonly operation: SignerOperation,
-    options: { cause: unknown },
+    options: {
+      cause: unknown;
+      /** The request of a multi-step operation, see `SignerTimeoutError.step`. */
+      step?: string | undefined;
+      /** What failed; default "request failed". */
+      what?: string | undefined;
+    },
   ) {
-    super(`${operation}: request failed: ${describe(options.cause)}`, options);
+    const { step, what = 'request failed' } = options;
+    super(`${operation}: ${step ? `${step}: ` : ''}${what}: ${describe(options.cause)}`, {
+      cause: options.cause,
+    });
+    this.step = step;
   }
 }
 
@@ -112,6 +152,29 @@ export class SignerResponseError extends SignerError {
   }
 }
 
+/**
+ * The messages along the `cause` chain, e.g. "fetch failed: connect ECONNREFUSED 127.0.0.1:3040".
+ * An `AggregateError` (every address of a host name refused) lists its errors. Beware: undici puts
+ * an invalid header value into its message, so every secret header must be checked beforehand
+ * (`HEADER_TOKEN`), and a base URL never carries credentials or a query (`parseBaseUrl`).
+ */
 function describe(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+  const parts: string[] = [];
+  let current = cause;
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth++) {
+    const part = messageOf(current);
+    if (part !== '' && parts.at(-1) !== part) parts.push(part);
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return parts.join(': ') || String(cause);
+}
+
+function messageOf(error: unknown): string {
+  if (error instanceof AggregateError && error.errors.length > 0) {
+    return [...new Set(error.errors.map(messageOf))].filter((m) => m !== '').join(', ');
+  }
+  if (!(error instanceof Error)) return String(error);
+  if (error.message !== '') return error.message;
+  const code: unknown = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : '';
 }

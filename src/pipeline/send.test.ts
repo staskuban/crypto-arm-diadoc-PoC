@@ -22,6 +22,7 @@ import {
   type ShelfUploadOptions,
 } from '../diadoc/index.js';
 import {
+  SignerNetworkError,
   SignerTimeoutError,
   type SignResult,
   type Signer,
@@ -416,6 +417,20 @@ describe('sendUtd failures before sending', () => {
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'SIGN_FAILED', step: 'sign', cause });
     expect(diadoc.calls).toHaveLength(0);
+  });
+
+  it('does not repeat a root cause the signer error already names', async () => {
+    const { signer, run } = setup();
+    signer.signResult = new SignerNetworkError('sign', {
+      step: 'upload',
+      cause: new TypeError('fetch failed', {
+        cause: new Error('connect ECONNREFUSED 127.0.0.1:3040'),
+      }),
+    });
+    // The pipeline's own "<step>: " prefix, then the signer message as is.
+    expect((await failure(run())).message).toBe(
+      'sign: sign: upload: request failed: fetch failed: connect ECONNREFUSED 127.0.0.1:3040',
+    );
   });
 
   it('fails fast when the signature does not verify', async () => {
