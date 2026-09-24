@@ -101,8 +101,8 @@ How it was checked:
     - `scripts/documents-secrets.sh:57` trims the same file. So the Документы stand may send a key the server does not accept (401), or the server may accept an empty key.
     - Fix: trim the keys and drop empty ones in `start.sh`, with a test. The server's handling needs a stand.
 22. **`AUTH_MODE=apikey` with an empty key list is not refused** — **UNVERIFIED**. `start.sh:158-159,240`. Upstream behaviour (deny all vs allow all) is unknown. Fix: warn or `die`; check on a throwaway stand.
-23. **Документы stand hardening is uneven** — **(config render)**. `docker/cryptoarm-documents/docker-compose.yml:103-146`: `ca-stub` and `documents-db` have no `cap_drop`/`no-new-privileges`, and `postgres:14.4` and `nginx:1.27-alpine` are pinned by tag only. The tag pinning is in the README caveats; the missing capability drop is not. Needs a throwaway stand to find the minimal capabilities.
-24. **The app image is the M7 of R1 again** — **(read)**.
+23. **Документы stand hardening is uneven** — **(config render)**. *Fixed in F17.* `docker/cryptoarm-documents/docker-compose.yml:103-146`: `ca-stub` and `documents-db` have no `cap_drop`/`no-new-privileges`, and `postgres:14.4` and `nginx:1.27-alpine` are pinned by tag only. The tag pinning is in the README caveats; the missing capability drop is not. Needs a throwaway stand to find the minimal capabilities.
+24. **The app image is the M7 of R1 again** — **(read)**. *Fixed in F17.*
     - `Dockerfile:1` uses `# syntax=docker/dockerfile:1` (unpinned frontend), which contradicts the reasoning in `docker/cryptoarm-server/Dockerfile:4-5`. `Dockerfile:5,13` use `node:22-bookworm-slim` without a digest.
     - Service `app` (`docker-compose.yml:14-47`) has no `cap_drop`, `no-new-privileges` or `read_only`, although it receives the whole root `.env` (`DIADOC_CLIENT_SECRET`, refresh token) as environment.
 25. **Test-CA root trusted on first use over http** — **(read, documented)**. `scripts/issue-test-cert.sh:185-195,206` installs a self-signed AIA issuer into `mroot` of the shared server if only the DN matches. `fetch-test-certs.sh:46` already pins renewal 21 by SHA-256; reuse that allowlist.

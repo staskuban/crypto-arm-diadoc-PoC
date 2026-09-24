@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests for the container hardening in the compose files of both stands (I6): read-only root
-# filesystem, tmpfs for the paths the services write, CPU/memory/PID limits, env overrides.
-# Reads the resolved config with `docker compose config` (no daemon, no containers). Skipped
-# without the docker CLI or jq.
+# Tests for the container hardening in the compose files of both stands (I6) and of the app (F17):
+# read-only root filesystem, tmpfs for the paths the services write, CPU/memory/PID limits, env
+# overrides, capability drop, no-new-privileges, images pinned by digest (also in the root
+# Dockerfile). Reads the resolved config with `docker compose config` (no daemon, no containers).
+# Skipped without the docker CLI or jq.
 # Run: scripts/test/stand-hardening.test.sh
 set -euo pipefail
 
@@ -40,6 +41,11 @@ cp "$repo/docker/cryptoarm-server/start.sh" "$work/server/"
 mkdir -p "$work/server/secrets"
 config "$work/server/docker-compose.yml" "$work/server.json"
 config "$documents_compose" "$work/documents.json"
+# The root compose file (service app) includes the server's: render it from a copy with the same stubs.
+mkdir -p "$work/root/docker"
+cp "$repo/docker-compose.yml" "$work/root/"
+cp -R "$work/server" "$work/root/docker/cryptoarm-server"
+config "$work/root/docker-compose.yml" "$work/root.json" COMPOSE_PROFILES=app
 
 # q <json file> <jq filter>: prints the result (raw).
 q() { jq -r "$2" "$1"; }
@@ -104,6 +110,41 @@ check "documents: default limits" \
 config "$documents_compose" "$work/documents-env.json" DOCUMENTS_API_CPUS=2 DOCUMENTS_API_MEMORY=2g DOCUMENTS_API_PIDS=512
 check "documents-api: limits overridable via env" \
   eq "$(q "$work/documents-env.json" '.services["documents-api"] | "\(.cpus) \(.mem_limit) \(.pids_limit)"')" "2 2147483648 512"
+
+# F17 (R2 minor 23): capability drop, no-new-privileges and a non-root user for ca-stub and
+# documents-db (both images start as root only to switch users; as the image's own user they need no
+# capability), and every image pinned by digest.
+for svc in documents-api ca-stub documents-db; do
+  check "$svc: cap_drop ALL" eq "$(q "$d" ".services[\"$svc\"].cap_drop // [] | join(\",\")")" ALL
+  check "$svc: no cap_add" eq "$(q "$d" ".services[\"$svc\"].cap_add // [] | length")" 0
+  check "$svc: no-new-privileges" eq "$(q "$d" ".services[\"$svc\"].security_opt // [] | index(\"no-new-privileges:true\") != null")" true
+done
+check "documents-db: runs as the image's postgres user (uid of the data files and the socket tmpfs)" \
+  eq "$(q "$d" '.services["documents-db"].user')" 999:999
+check "ca-stub: runs as the image's nginx user" eq "$(q "$d" '.services["ca-stub"].user')" 101:101
+check "ca-stub: tmpfs owned by the nginx user" \
+  eq "$(q "$d" '[.services["ca-stub"].tmpfs[] | select(test("uid=101,gid=101"))] | length')" 2
+for svc in documents-api documents-db ca-stub; do
+  check "$svc: image pinned by digest" \
+    bash -c "jq -r '.services[\"$svc\"].image' '$d' | grep -Eq '^[^@]+:[^@/]+@sha256:[0-9a-f]{64}\$'"
+done
+
+# F17 (R2 minor 24): the app service and its image.
+a="$work/root.json"
+check "app: read_only root filesystem" eq "$(q "$a" '.services.app.read_only')" true
+check "app: tmpfs /tmp" has_tmpfs "$a" app /tmp
+check "app: cap_drop ALL" eq "$(q "$a" '.services.app.cap_drop // [] | join(",")')" ALL
+check "app: no cap_add" eq "$(q "$a" '.services.app.cap_add // [] | length')" 0
+check "app: no-new-privileges" eq "$(q "$a" '.services.app.security_opt // [] | index("no-new-privileges:true") != null')" true
+check "app: refresh-token dir stays a writable volume" \
+  eq "$(q "$a" '.services.app.volumes[] | select(.target == "/var/lib/app/diadoc") | "\(.type) \(.read_only // false)"')" "volume false"
+dockerfile="$repo/Dockerfile"
+check "Dockerfile: two stages (the FROM checks below are not vacuous)" \
+  eq "$(grep -Eic '^[[:space:]]*FROM ' "$dockerfile")" 2
+check "Dockerfile: every FROM of a registry image is pinned by digest" \
+  bash -c "! grep -Ei '^[[:space:]]*FROM ' '$dockerfile' | grep -Eiv '^FROM [^ ]+:[^ @]+@sha256:[0-9a-f]{64}( AS [a-z0-9_-]+)?\$' | grep ."
+check "Dockerfile: no unpinned syntax frontend" \
+  bash -c "! grep -Ei '^# *syntax *=' '$dockerfile' | grep -v '@sha256:[0-9a-f]\\{64\\}' | grep ."
 
 echo
 if [ "$failures" -eq 0 ]; then

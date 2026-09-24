@@ -40,14 +40,26 @@ Secrets are files in `./secrets`, mounted read-only at `/run/secrets`. `start.sh
 - **The stands are coupled through the network.** `documents-api` is attached to the server stand's network (`graph-root_default`): while it exists, `docker compose down` of the server stand cannot remove that network ("Resource is still in use"); if the network is recreated, `documents-api` cannot start (not even via `restart`) until this project's `up` runs again. Stop this stand before tearing down the server stand.
 - **Licence location.** `documents-secrets.sh` reads the licence from `docker/cryptoarm-server/secrets/documents_license_value` by default. That directory is mounted into the КриптоАРМ Server container, which does not need the licence: on the worktree that runs the server stand keep it elsewhere (`DOCUMENTS_LICENSE_FILE=…`) or delete the source after copying — the copy in `docker/cryptoarm-documents/secrets/license_value` is what the stand uses.
 - **Server API key is required.** Pass the `api_keys` of the worktree that runs the server (`SIGN_SERVICE_API_KEYS_FILE`); without it the script stops (`SIGN_SERVICE_API_KEY_OPTIONAL=1` only for `AUTH_MODE=none`), otherwise `cloud-sign` would fail with 401 at run time.
-- **Linux hosts (unverified).** Secrets are 0600 files of the host user; checked on Docker Desktop only. On Linux, postgres reads `POSTGRES_PASSWORD_FILE` as uid 999 and the API runs with `cap_drop: [ALL]` (no `DAC_OVERRIDE`), so the files need matching ownership/permissions (same caveat as the server stand, I5).
-- `ca-stub` mounts the whole `SIGNER_CERTS_DIR` (the server's `certs/` includes `user/` for PIN-less PFX) but serves only the mapped `.cer` files; point `SIGNER_CERTS_DIR` at a directory with only the `.cer` files if `certs/user` holds real keys. `postgres`/`nginx` images are pinned by tag only.
+- **Linux hosts (unverified).** Secrets are 0600 files of the host user; checked on Docker Desktop only (it shows a bind-mounted file as owned by whichever uid reads it). On Linux, postgres reads `POSTGRES_PASSWORD_FILE` as uid 999, `ca-stub` reads the `.cer` files as uid 101 (F17), and the API runs with `cap_drop: [ALL]` (no `DAC_OVERRIDE`), so the files need matching ownership/permissions (same caveat as the server stand, I5).
+- `ca-stub` mounts the whole `SIGNER_CERTS_DIR` (the server's `certs/` includes `user/` for PIN-less PFX) but serves only the mapped `.cer` files; point `SIGNER_CERTS_DIR` at a directory with only the `.cer` files if `certs/user` holds real keys.
 - `smoke-documents.sh` with `DOCUMENTS_SIGNER_EMAIL` resets that user's password on every run (`PUT /api/v1/users/{id} {password}` keeps login and e-mail — verified): test stands only.
 
 ## Container hardening
 
 All three containers run with `read_only: true` and CPU/memory/PID limits (I6). The writable paths were found with
 `docker diff` on a running stand after a smoke run.
+
+All three also run with `cap_drop: [ALL]`, no `cap_add` and `no-new-privileges` (API since I2, `ca-stub` and
+`documents-db` since F17), and every image is pinned by tag + index digest (`postgres:14.4@sha256:9ceb24f8…`,
+`nginx:1.27-alpine@sha256:65645c7b…`, the same images the I2 stand pulled; bump tag and digest together).
+`postgres` and `nginx` start as root only to drop to their own user (`gosu postgres`, nginx workers as `nginx`),
+which needs `SETUID`/`SETGID` (and `CHOWN`/`FOWNER` for the entrypoint's `chown`/`chmod` of `PGDATA`; read from the entrypoints, not measured). F17 runs them
+as that user from the start instead — `documents-db` as `999:999`, `ca-stub` as `101:101` — so they need no
+capability at all: the postgres entrypoint skips its root-only steps (the data volume is already owned by 999:
+initdb always ran as `postgres`), nginx binds 8080 without privilege, and the `ca-stub` tmpfs mounts are owned by 101. Verified on a throwaway stand (F17): an existing DB volume created under the old file opens unchanged
+(document ids went on counting), a fresh volume initialises, both smokes sign, and the old file runs again on the
+new volume. `ca-stub` then logs `the "user" directive makes sense only if the master process runs with super-user
+privileges, ignored`: expected.
 
 | Service         | Writable                                                                                  | Limits (env override, default)                                                             |
 | --------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -98,6 +110,42 @@ the API: its image is pinned by digest and already present.
 the same `up -d --wait`; commit the restored file (or revert the merge) in `graph-root`. The images do not change, so
 there is no image to restore. The unused volume `kryptoarm-diadoc-i2_documents-logs` can be removed with
 `docker volume rm`.
+
+**Rollout on the shared stand** (F17: capability drop, own users, digests for `ca-stub` and `documents-db`). Run it
+in the `graph-root` worktree after F17 is merged there, in a fresh terminal (no `DOCUMENTS_*` exports from a
+throwaway stand). Only `ca-stub` and `documents-db` are recreated; `documents-api` keeps running and reconnects to the
+DB (verified on the throwaway rehearsal): `cloud-sign` and every DB request fail for the ~5–10 s the DB needs to
+come back, so warn whoever uses the stand. The images do not change (same content, now referenced by digest; both are
+present locally, nothing is pulled). Keep the git-ignored `docker/cryptoarm-documents/secrets` and never `down -v`.
+No `#` comments in the block (interactive zsh).
+
+Expected: `git log` prints the F17 merge; the `.env` check prints `no-image-overrides` (an old `DOCUMENTS_DB_IMAGE`/`DOCUMENTS_CA_STUB_IMAGE` line there bypasses the digests: remove it first); the dry run shows `Recreate` for `ca-stub` and `documents-db` and `Running` for `documents-api`; `up`
+reports 3 × `Healthy`; `inspect` prints `true [ALL] [no-new-privileges:true]` for all three, with `101:101` for
+`ca-stub`, `999:999` for `documents-db` and an empty user for the API (the image runs as root, verified), and every image with `@sha256:`; the log check prints `db-clean` (a `FATAL:  the database system is starting up` from the API reconnecting during the restart is expected); both smokes end with `OK` and the document
+id continues the old count.
+
+```sh
+cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+git log --oneline -1 --merges --grep '^Merge F17-container-hardening-3 into graph-root$'
+grep -n '_IMAGE' docker/cryptoarm-documents/.env || echo no-image-overrides
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml --dry-run up -d
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
+docker inspect -f '{{.Name}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.User}} {{.Config.Image}}' $(docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml ps -q)
+docker logs --since 2m kryptoarm-diadoc-i2-documents-db-1 2>&1 | grep -iE 'permission denied|could not|panic' || echo db-clean
+scripts/smoke-documents.sh
+DOCUMENTS_SIGNER_EMAIL=o2-platforma@documents.local CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer DATA_FILE="$(ls src/utd/fixtures/*.xml | head -1)" scripts/smoke-documents.sh
+```
+
+**Rollback (F17):** restore the file of the commit before the F17 merge and run the same `up -d --wait` (again only
+`ca-stub` and `documents-db` are recreated; the old file on a volume used under F17 was verified on the throwaway
+stand), then commit the restored file in `graph-root`. This restores the whole file as it was before the merge, so it also drops later changes to it; if there are any, use `git revert -m 1 <F17 merge>` instead:
+
+```sh
+cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+git checkout "$(git log --format=%H -1 --merges --grep '^Merge F17-container-hardening-3 into graph-root$')^1" -- docker/cryptoarm-documents/docker-compose.yml
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
+scripts/smoke-documents.sh
+```
 
 ## How `cloud-sign` picks the key
 
