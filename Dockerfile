@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Pipeline app image: `docker compose run --rm app send <ИдФайл>.xml` (see docker-compose.yml).
+# Pipeline app image: `docker compose run --rm --no-deps app send <ИдФайл>.xml` (see docker-compose.yml).
 # Pure JS, no native deps, so it builds for the host platform (the КриптоАРМ Server image is amd64-only).
 
 FROM node:22-bookworm-slim AS build

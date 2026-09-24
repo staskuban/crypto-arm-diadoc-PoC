@@ -67,27 +67,37 @@ winston files (`/logs/application-<date>.log`, 20 MB × 14 days) go to the `docu
 `nginx`'s entrypoint logs `can not modify /etc/nginx/conf.d/default.conf (read-only file system?)`: expected, the
 config is mounted read-only anyway.
 
-**Rollout on the shared stand** (after merging I6 into `graph-root`; recreates all three containers, the API is
-down for ~20–30 s, so warn T7):
+**Rollout on the shared stand** (I6). Run it in the `graph-root` worktree after F10 is merged there, **after** the
+server rollout in `docker/cryptoarm-server/README.md` (that order is the documented one; the stand itself kept
+signing across the server's recreation). Project `kryptoarm-diadoc-i2`: all three containers are recreated and the
+API is down for ~20–30 s. The git-ignored `docker/cryptoarm-documents/secrets` of `graph-root` (licence, DB and
+admin passwords, server API key) must be kept: the DB volume only opens with that `postgres_password`. Never `down -v`
+this project: it deletes users, documents and signatures. No `#` comments in the block (interactive zsh).
+
+Expected: `ps` shows the server `healthy`; the `docker cp` of the old logs (optional, outside the repo: they live in
+the old container layer) succeeds or is skipped; the dry run shows 3 × `Recreate`; `up` reports 3 × `Healthy`;
+`inspect` prints `true` for all three; both smokes end with `OK`; the integration test passes without skips.
 
 ```sh
-docker cp kryptoarm-diadoc-i2-documents-api-1:/logs ~/documents-logs-pre-i6    # optional, outside the repo: old logs live in the container layer
-docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml --dry-run up -d  # 3 x Recreate
+cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+docker compose ps cryptoarm-server
+docker cp kryptoarm-diadoc-i2-documents-api-1:/logs ~/documents-logs-pre-i6
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml --dry-run up -d
 docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
-docker inspect -f '{{.Name}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}}' \
-  $(docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml ps -q)
-scripts/smoke-documents.sh                                                      # admin -> cryptoarm.server.test.cer
-DOCUMENTS_SIGNER_EMAIL=o2-platforma@documents.local CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer \
-  DATA_FILE=src/utd/fixtures/<ИдФайл>.xml scripts/smoke-documents.sh
+docker inspect -f '{{.Name}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}}' $(docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml ps -q)
+scripts/smoke-documents.sh
+DOCUMENTS_SIGNER_EMAIL=o2-platforma@documents.local CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer DATA_FILE="$(ls src/utd/fixtures/*.xml | head -1)" scripts/smoke-documents.sh
+CRYPTOARM_SERVER_URL=http://127.0.0.1:3037 CRYPTOARM_SERVER_API_KEY="$(head -1 docker/cryptoarm-server/secrets/api_keys)" SIGNER_CERT_PATH=docker/cryptoarm-server/certs/cryptoarm.server.test.cer DOCUMENTS_URL=http://127.0.0.1:3040 DOCUMENTS_LOGIN=admin DOCUMENTS_PASSWORD_FILE=docker/cryptoarm-documents/secrets/admin_password npm test -- src/signer/documents-cloud-signer.integration.test.ts
 ```
 
-The volumes `documents-db` and `documents-uploads` are kept, and so are users, documents and signatures. The
-compose file runs neither `build` nor `pull` for the API: its image is pinned by digest and already present. The
-order relative to the server rollout does not matter.
+The volumes `documents-db` and `documents-uploads` are kept, and so are users, documents and signatures (the
+document ids went on counting on the throwaway rehearsal, F10). The compose file runs neither `build` nor `pull` for
+the API: its image is pinned by digest and already present.
 
-**Rollback:** `git checkout <commit before the I6 merge> -- docker/cryptoarm-documents/docker-compose.yml`, then
-the same `up -d --wait`; commit the restored file (or revert the merge) in `graph-root`. The images do not change, so there is no image to restore. The unused volume
-`kryptoarm-diadoc-i2_documents-logs` can be removed with `docker volume rm`.
+**Rollback:** `git checkout 56d7226 -- docker/cryptoarm-documents/docker-compose.yml` (graph-root before I6), then
+the same `up -d --wait`; commit the restored file (or revert the merge) in `graph-root`. The images do not change, so
+there is no image to restore. The unused volume `kryptoarm-diadoc-i2_documents-logs` can be removed with
+`docker volume rm`.
 
 ## How `cloud-sign` picks the key
 

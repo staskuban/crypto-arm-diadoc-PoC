@@ -10,7 +10,8 @@ keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follo
   `certmgr` errors, then execs the server under `init`. An empty `TRUSTED_LICENSE` warns instead of aborting.
 - Compose adds project-scoped names, `linux/amd64`, a loopback-only port, read-only `certs` and `secrets`
   mounts, `cap_drop: [ALL]`, `no-new-privileges` and a healthcheck.
-- It also splits build and run (D8, see [Build and run](#run)).
+- It also splits build and run (D8, see [Build and run](#run)) and binds the compose file to its own image tag
+  `…:stand-i6` (F10), so an older image is never run under it.
 - Read-only root filesystem with tmpfs for the paths the server writes, and CPU/memory/PID limits (I6, see
   [Container hardening](#container-hardening)).
 - `LOG_LEVEL` defaults to `warn,error`. At the `log` level the server prints the first 8 characters of the API key
@@ -38,20 +39,23 @@ The image is `linux/amd64` only. On Apple Silicon it runs under emulation, so it
 ## Run
 
 ```sh
+# from the repo root (the root compose file `include`s this one)
 scripts/fetch-test-certs.sh                  # upstream test certs → docker/cryptoarm-server/certs (git-ignored)
-cd docker/cryptoarm-server
-(umask 077; cp .env.example .env)            # non-secret settings only
-(umask 077; printf '%s' '<license key>' > secrets/trusted_license; openssl rand -hex 24 > secrets/api_keys)
-docker compose build cryptoarm-server-image  # build-only service (profile "build")
-docker compose up -d
-docker compose ps                            # wait for "healthy"
-CRYPTOARM_SERVER_API_KEY="$(head -1 secrets/api_keys)" SMOKE_STRICT=1 ../../scripts/smoke-server.sh
+(umask 077; cp docker/cryptoarm-server/.env.example docker/cryptoarm-server/.env)   # non-secret settings only
+(umask 077; printf '%s' '<license key>' > docker/cryptoarm-server/secrets/trusted_license
+  openssl rand -hex 24 > docker/cryptoarm-server/secrets/api_keys)
+docker compose build cryptoarm-server-image  # build-only service (profile "build"), tags …:stand-i6
+docker compose up -d --wait cryptoarm-server # fails unless "healthy"
+docker compose ps cryptoarm-server
+CRYPTOARM_SERVER_API_KEY="$(head -1 docker/cryptoarm-server/secrets/api_keys)" SMOKE_STRICT=1 scripts/smoke-server.sh
 ```
 
-From the repo root, the same commands work, because the root compose file `include`s this one. Pick one place
-and stick to it. The project name is `kryptoarm-diadoc-cryptoarm-server` in this directory and the worktree
-directory name from the root: the shared stand is project `graph-root`. The container name is fixed either way.
-Stop with `docker compose down`.
+Run compose from the repo root. The project name is then the worktree directory name: the shared stand is project
+`graph-root`, run from the `graph-root` worktree, with the network `graph-root_default` that the Документы stand
+joins. From this directory (or with `-f docker/cryptoarm-server/docker-compose.yml`) the same file is another
+project, `kryptoarm-diadoc-cryptoarm-server`, with its own network: `ps` there shows nothing of the shared stand,
+and `up` there would hit the fixed container name. Stop with `docker compose stop` (the Документы stand first, see
+its README).
 Swagger is at http://localhost:3037/docs. The healthcheck calls `GET /health/memory`, which needs no API key.
 
 **Build and run are separate (D8).** `cryptoarm-server` has no `build` section and `pull_policy: never`. The image
@@ -60,9 +64,19 @@ comes only from the build-only service `cryptoarm-server-image` (same tag, profi
 because of a new image. `up` on a machine without the image fails with "No such image": build it first. The
 container is still recreated when its _config_ changes (another worktree, a changed `.env` or compose file).
 Check with `docker compose --dry-run up -d` that it stays `Running`. The image tag is shared by all worktrees:
-building `cryptoarm-server-image` with the default tag anywhere else moves `…:local`, and the next `up` (or `run app`
+building `cryptoarm-server-image` with the default tag anywhere else moves `…:stand-i6`, and the next `up` (or `run app`
 without `--no-deps`) in `graph-root` recreates the shared stand on that image. Build the default tag only from
 `graph-root`, override `CRYPTOARM_SERVER_IMAGE` elsewhere, and keep using `run --rm --no-deps app`.
+
+**The compose file is bound to its image (F10).** Its default tag is `kryptoarm-diadoc/cryptoarm-server:stand-i6`, not
+the older shared `…:local` (the I5 image): the I6 file needs the I6 `start.sh` (D40). On a host that has only the
+old image, `docker compose up -d` and `docker compose run app …` without `--no-deps` fail with
+`No such image: kryptoarm-diadoc/cryptoarm-server:stand-i6`, and the running (or stopped) container is left alone: same
+container ID, same start time, no stop event (verified with compose 2.40.3 on a throwaway stand, both on an I6 test
+image and on the I5 image under the I5 file; compose looks the image up before it stops the old container). `--dry-run up -d` shows
+`Recreate` followed by the same error. The next change of the image contract gets a new tag in the same way
+(`scripts/test/stand-rollout.test.sh` pins the current one). `stand-*` tags belong to the shared stand only: name
+throwaway images after the task code (`:i5`, `:f10-…`), never `:stand-…`, or the next `up` in `graph-root` runs them.
 
 **Throwaway stand** next to the shared one (other project, container, image tag and port; its own `cert_storage`
 and `secrets` in that worktree):
@@ -142,35 +156,81 @@ file, nothing seeds the tmpfs: the API answers, but CSP fails with `Provider DLL
 `up --wait` fails instead of reporting a working stand. The other direction is safe: the new image under an older
 compose file starts and signs as before (verified).
 
-**Rollout on the shared stand** (after merging I6 into `graph-root`; run from the `graph-root` worktree; recreates
-the server container for about 30 s, so warn whoever uses the stand, e.g. T7):
+**Rollout on the shared stand** (I6 + F10). Run it in the `graph-root` worktree **after** F10 is merged there, in a
+fresh terminal (no `CRYPTOARM_*` exports left over from a throwaway stand). Order: this server first, then the
+Документы stand of project `kryptoarm-diadoc-i2` (its README). The server container is recreated (~10 s until
+`healthy` once the image is built), so warn whoever uses the stand. The git-ignored
+`docker/cryptoarm-server/{secrets,certs,cert_storage}` of `graph-root` hold the licence, the API key and the keys
+(including the I3 key of ООО «О2 ПЛАТФОРМА»): keep them, never `down -v` or `git clean` there. The blocks contain no
+`#` comments on purpose: interactive zsh does not treat them as comments unless `interactivecomments` is set.
+
+1. Checks. Expected: the F10 merge (or later); no `CRYPTOARM_` variables; `kryptoarm-diadoc/cryptoarm-server:stand-i6`;
+   the image list has `local` (the I5 image) but **no** `stand-i6`. Stop if any of it differs (a `stand-i6` built
+   elsewhere would be rolled out by the next `up` without further checks).
+
+   ```sh
+   cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+   git log -1 --oneline
+   env | grep '^CRYPTOARM_'
+   docker compose config --images
+   docker image ls kryptoarm-diadoc/cryptoarm-server
+   ```
+
+2. Rollback tag (never overwritten on a re-run), build, dry run. Expected: `pre-i6` has the image ID of `local`;
+   `stand-i6` is built and `local` did not move; the dry run shows `Recreate` for `kryptoarm-diadoc-cryptoarm-server` only.
+
+   ```sh
+   docker image inspect kryptoarm-diadoc/cryptoarm-server:pre-i6 >/dev/null 2>&1 || docker tag kryptoarm-diadoc/cryptoarm-server:local kryptoarm-diadoc/cryptoarm-server:pre-i6
+   docker compose build cryptoarm-server-image
+   docker image ls kryptoarm-diadoc/cryptoarm-server
+   docker compose --dry-run up -d
+   ```
+
+3. Roll out and check. Expected: `up` reports `Healthy` (it fails if CSP is broken); `inspect` prints
+   `kryptoarm-diadoc/cryptoarm-server:stand-i6 true 2147483648 256`; both smokes end with `smoke: OK`; the integration
+   tests pass without skips.
+
+   ```sh
+   docker compose up -d --wait cryptoarm-server
+   docker inspect -f '{{.Config.Image}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' kryptoarm-diadoc-cryptoarm-server
+   K="$(head -1 docker/cryptoarm-server/secrets/api_keys)"
+   CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 scripts/smoke-server.sh
+   CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 scripts/smoke-server.sh
+   CRYPTOARM_SERVER_URL=http://127.0.0.1:3037 CRYPTOARM_SERVER_API_KEY="$K" SIGNER_CERT_PATH=docker/cryptoarm-server/certs/cryptoarm.server.test.cer npm test -- src/signer/server-cms-signer.integration.test.ts src/pipeline/signature-policy.integration.test.ts
+   unset K
+   ```
+
+Then the Документы stand (its README, "Rollout on the shared stand"). It finds the new server container by name on
+the network `graph-root_default`, which survives the server's recreation (a Документы stand still on the old file
+kept signing, verified). `cert_storage` is a bind mount and is kept.
+
+Until F10 is merged into them, worktrees branched from `graph-root` between F9 and F10 still carry the I6 file with
+the old default `…:local`: do not build or start the server stand from them (a `build cryptoarm-server-image` there
+moves `…:local`; the rollback below re-tags it from `…:pre-i6`).
+
+Rehearsed end to end on throwaway stands (F10, 2026-09-24): an I5 stand (the I5 image under the I5 file, with a
+freshly issued О2 key) and a pre-I6 Документы stand, both smoke-tested; then, with the F10 files, `up -d` and
+`run app` before the build failed with "No such image" and left the container untouched; then the steps above
+(with throwaway tags), both smokes with both certificates, the three signer integration tests (13 passed), the
+Документы rollout with both users (DB, users and documents kept), the rollback below, and `down -v` (the throwaway
+image tags `…:f10-*` stay on the host until removed by hand).
+
+**Rollback** (server): back to the pre-I6 file, which runs `…:local` (the I5 image, untouched by the `…:stand-i6`
+build). The `[ … ] ||` line re-tags `…:local` from `…:pre-i6` only if `…:local` moved. `56d7226` is `graph-root`
+before I6 (F9). Commit the restored file, so that the next `up` does not re-apply it. The restored file fails
+`scripts/test/stand-rollout.test.sh` and `stand-hardening.test.sh` in `graph-root`; for a lasting rollback revert
+the F9 and F10 merges instead (`git revert -m 1 <merge>`), which restores file and tests together.
 
 ```sh
-docker image inspect kryptoarm-diadoc/cryptoarm-server:pre-i6 >/dev/null 2>&1 ||  # never overwrite it on a re-run
-  docker tag kryptoarm-diadoc/cryptoarm-server:local kryptoarm-diadoc/cryptoarm-server:pre-i6  # rollback image
-docker compose build cryptoarm-server-image         # FIRST: the new compose file needs the new image (D40)
-docker compose --dry-run up -d                      # expect only cryptoarm-server to be recreated
-docker compose up -d --wait cryptoarm-server        # fails if unhealthy (old image or CSP broken)
-docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' \
-  kryptoarm-diadoc-cryptoarm-server                 # true 2147483648 256
-K="$(head -1 docker/cryptoarm-server/secrets/api_keys)"
-CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 scripts/smoke-server.sh
-CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 \
-  scripts/smoke-server.sh
-# + the signer integration tests (CLAUDE.md) and scripts/smoke-documents.sh for both users
+cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+git checkout 56d7226 -- docker/cryptoarm-server/docker-compose.yml
+[ "$(docker image inspect -f '{{.Id}}' kryptoarm-diadoc/cryptoarm-server:local)" = "$(docker image inspect -f '{{.Id}}' kryptoarm-diadoc/cryptoarm-server:pre-i6)" ] || docker tag kryptoarm-diadoc/cryptoarm-server:pre-i6 kryptoarm-diadoc/cryptoarm-server:local
+docker compose up -d --wait cryptoarm-server
+git commit -m "Roll back the server compose file to pre-I6" docker/cryptoarm-server/docker-compose.yml
 ```
 
-The Документы stand can stay up. It is attached to the network `graph-root_default`, which survives the
-server's recreation, and it finds the new container by name. On the throwaway stand `smoke-documents.sh` passed
-after a `--force-recreate` of the server without restarting `documents-api`. `cert_storage` (the keys, including
-the I3 key) is a bind mount and is kept.
-
-**Rollback:** `git checkout <commit before the I6 merge> -- docker/cryptoarm-server/docker-compose.yml`. To also go
-back to the old image, run `docker tag kryptoarm-diadoc/cryptoarm-server:pre-i6 kryptoarm-diadoc/cryptoarm-server:local`
-now, **after** restoring the file and **before** `up`. Then run `docker compose up -d --wait cryptoarm-server`; compose
-recreates the container when the config or the image ID changed. The I6 image also works under the old file, so the
-retag is optional. Never run the old image with the new file (D40). Commit the restored compose file (or revert the
-merge) in `graph-root`, so that the next `up` does not re-apply it.
+The I6 image also works under the old file (verified), but never run the old image with the I6 file (D40): with F10
+that needs an explicit `CRYPTOARM_SERVER_IMAGE=…:local`, so do not set it.
 
 ## Certificates and keys
 
@@ -233,7 +293,7 @@ step fails before the certificate is bound, the new key container is deleted aga
 the container is killed first. An issuer that was already installed into `mroot` stays there.
 
 ```sh
-docker compose -f docker/cryptoarm-server/docker-compose.yml ps     # the stand must be running
+docker compose ps cryptoarm-server          # from the root of the worktree that runs the stand: must be healthy
 scripts/issue-test-cert.sh                                           # ~1 min under amd64 emulation
 CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer SMOKE_STRICT=1 \
   CRYPTOARM_SERVER_API_KEY=<key> scripts/smoke-server.sh
