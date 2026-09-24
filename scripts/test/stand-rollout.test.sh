@@ -16,7 +16,8 @@ repo="$here/../.."
 
 # The default image tag of the server compose file. Change it together with the image contract (what
 # start.sh must do for this file, e.g. seed the I6 tmpfs) and the rollout in the stand README.
-expected_image=kryptoarm-diadoc/cryptoarm-server:i6
+# `stand-` keeps it apart from throwaway tags, which are named after task codes (`:i5`, `:i6`, `:f10-…`).
+expected_image=kryptoarm-diadoc/cryptoarm-server:stand-i6
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -31,17 +32,22 @@ check() { # name, command...
 eq() { [ "$1" = "$2" ] || { echo "       expected '$2', got '$1'"; return 1; }; }
 
 # --- Documented commands --------------------------------------------------------------------------
-# no_deps_everywhere <file>: every `docker compose [-p x] [-f y] run` line names --no-deps.
+# no_deps_everywhere <file>: every `docker compose [global options] run` (or `docker-compose … run`) line
+# names --no-deps. Global options: -p/-f/--profile/--project-name/--file/--env-file with a value.
+run_re='docker[ -]compose( +(-[pf]|--(profile|project-name|file|env-file|project-directory))[ =][^ ]+)* +run '
 no_deps_everywhere() {
   local file="$1" bad
-  bad="$(grep -nE 'docker compose( +-[pf] +[^ ]+)* +run ' "$file" | grep -v -- '--no-deps' || true)"
+  bad="$(grep -nE "$run_re" "$file" | grep -v -- '--no-deps' || true)"
   [ -z "$bad" ] || { echo "$bad" | sed 's/^/       /'; return 1; }
 }
 for f in Dockerfile .env.example docker-compose.yml CLAUDE.md; do
   check "$f: every 'docker compose run' passes --no-deps" no_deps_everywhere "$repo/$f"
 done
-printf '%s\n' '# docker compose -p x run --rm app send x.xml' >"$work/bad"
-check "the no-deps check catches a command without it" eval '! no_deps_everywhere "$work/bad" >/dev/null'
+for bad in 'docker compose -p x run --rm app send x.xml' 'docker compose --profile app run --rm app send x.xml' \
+  'docker-compose run --rm app send x.xml' 'docker compose --project-name=x --file y.yml run app'; do
+  printf '# %s\n' "$bad" >"$work/bad"
+  check "the no-deps check catches: $bad" eval '! no_deps_everywhere "$work/bad" >/dev/null'
+done
 check "CLAUDE.md: no healthy-wait promised for run --no-deps (it skips depends_on)" \
   bash -c "! grep -n -- '--no-deps app send' '$repo/CLAUDE.md' | grep -q 'waits for \`cryptoarm-server\` healthy'"
 
@@ -66,8 +72,6 @@ else
 
   check "cryptoarm-server: default image is $expected_image" \
     eq "$(q "$s" '.services["cryptoarm-server"].image')" "$expected_image"
-  check "cryptoarm-server: default image is not the old shared …:local (D40)" \
-    bash -c "[ \"\$(jq -r '.services[\"cryptoarm-server\"].image' '$s')\" != kryptoarm-diadoc/cryptoarm-server:local ]"
   check "cryptoarm-server: never pulled (a missing image fails instead)" \
     eq "$(q "$s" '.services["cryptoarm-server"].pull_policy')" never
   check "cryptoarm-server: no build section (D8)" \

@@ -3,7 +3,7 @@
 # CSP tools and temp dirs in place of the container paths.
 # Run: scripts/test/cryptoarm-start.test.sh
 # Under the container's shell (dash):
-#   docker run --rm -v "$PWD:/repo:ro" --entrypoint bash kryptoarm-diadoc/cryptoarm-server:local \
+#   docker run --rm -v "$PWD:/repo:ro" --entrypoint bash kryptoarm-diadoc/cryptoarm-server:stand-i6 \
 #     -c 'TEST_SH=dash /repo/scripts/test/cryptoarm-start.test.sh'
 set -euo pipefail
 
