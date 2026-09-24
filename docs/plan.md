@@ -10,7 +10,8 @@ T0 graph-root ─┬─ I1 infra-server
                └─ T1 scaffold ─┬─ T2 signer
                                ├─ T3 diadoc-client
                                └─ T4 utd-domain
-T5 pipeline      ← T2, T3, T4
+F2 ber-to-der    ← T2, T4
+T5 pipeline      ← T2, T3, T4, F2
 T6 integration   ← T5, I1, S1
 Deferred (needs Документы LICENSE_VALUE):
 I2 infra-documents ← I1;  T7 documents-cloud-signer ← I2, T2
@@ -25,7 +26,8 @@ I2 infra-documents ← I1;  T7 documents-cloud-signer ← I2, T2
 | T2 | `Signer` interface + `ServerCmsSigner` (`/cms/sign`, `detached: true`, `CAdES-BES`, `.cer` only; API key; error mapping) | T1 | unit tests with mocked HTTP green | — | | done: `src/signer/` (`Signer` with `sign`/`verify` + `AbortSignal`, `ServerCmsSigner`, env loader, typed errors); unit tests green; opt-in `server-cms-signer.integration.test.ts` green against the I1 stand (detached, verify valid, tampered → `valid:false`) |
 | T3 | Diadoc client: OIDC refresh with auto-renew, `GetDocumentTypes (V3)`, `CanPostMessage`, `PostMessage (V3)`, `GetDocument` → `DocflowStatus`, `Retry-After` | T1 | unit tests with mocked HTTP green | — | done (branch `T3-diadoc-client`, not merged): `src/diadoc` — `RefreshTokenAuth` (cache with margin, single-flight, rotated token persisted via callback before caching, conditional `invalidate(token)`, timeout), `DiadocClient` (prod/staging, `GetMyOrganizations`, `GetOrganization`, `V3/GetDocumentTypes`, `CanPostMessage`, `V3/PostMessage` with `operationId`/204 retry/409 → `DiadocConflictError`, `V3/GetDocument` → `DocflowStatus`, one retry on 401); 59 unit tests green. Not checked live (no credentials) |
 | T4 | УПД domain: XML kept as `Buffer` end to end, check `encoding="windows-1251"`, file name == `@ИдФайл`, pick `Function`/`Version`, size → inline vs shelf | T1 | unit tests on fixture XML green | sample УПД XML (can use generated fixture) | done: `src/utd/` — `parseUtd` (exact `Buffer`, windows-1251 declaration, file name == `ИдФайл.xml`, КНД 1115131, `Функция`, `Подписант`, `ВерсФорм` 5.03 → `utd970_05_03_01`, unknown → `UNKNOWN_FORMAT_VERSION` unless `resolveVersion` answers), `buildUtdAttachment` (camelCase domain object, DER signature, inline < 500 000 B else shelf); 55 unit tests on the S1 fixture + XSD enum checks |
-| T5 | Pipeline: XML → sign → verify → PostMessage → poll status | T2, T3, T4 | unit tests with fake Signer/Diadoc green | — | todo |
+| F2 | Normalize CMS from BER (indefinite length) to DER in the signer path, align `buildUtdAttachment` DER check; see D1 | T2, T4 | unit tests on a real BER CMS from the stand; integration test: normalized CMS still verifies on `/cms/verify` | — | todo |
+| T5 | Pipeline: XML → sign → verify → PostMessage → poll status | T2, T3, T4, F2 | unit tests with fake Signer/Diadoc green | — | todo |
 | T6 | Integration/e2e against dockerized Server + Diadoc staging | T5, I1, S1 | test УПД reaches the test box, `DocflowStatus` has no signature errors | all of the above | todo |
 | I2 | `docker/cryptoarm-documents` + IdP; `SIGN_METHOD_CORP_CLOUD=true`; find how `cloud-sign` picks the key | I1 | upload → cloud-sign → detached signature → verify | Документы `LICENSE_VALUE` | blocked |
 | T7 | `DocumentsCloudSigner` implementing `Signer` | I2, T2 | unit + integration green | — | blocked |
@@ -33,3 +35,14 @@ I2 infra-documents ← I1;  T7 documents-cloud-signer ← I2, T2
 Risks with dates:
 - Upstream test cert `CN=cryptoarm.server.test` and the test CA root expire **2026-10-28**. Replace it with a PIN-less PFX issued by the КриптоПро test CA before then, or I1/S1/T6 stop working.
 - The КриптоПро CSP Demo licence (empty `CRYPTOPRO_LICENSE`) lasts ~90 days from the first start of a fresh `cert_storage/`.
+
+## Discrepancies between merged tasks (2026-09-24, after merging T2–T4)
+
+| # | Between | Discrepancy | Resolution |
+|---|---|---|---|
+| D1 | T2 ↔ T4 (↔ Диадок docs) | КриптоАРМ Server `/cms/sign` returns CMS as **BER with indefinite lengths** (`30 80 …`); `buildUtdAttachment` requires DER; Диадок docs say `Signature` is DER. Wiring as is → the pipeline rejects a real signature | F2: re-encode the CMS container BER → DER (signed attributes and signature value unchanged), verify on the stand. Whether Диадок also accepts BER — check in S1 live run |
+| D2 | T3 ↔ T4 | T4 attachment is a domain object (camelCase, `Buffer`s, `inline`/`shelf` flag); T3 expects Диадок `DocumentAttachment` (`TypeNamedId`, `SignedContent { Content \| NameOnShelf, Signature }`) | Intentional; mapping + shelf upload belong to T5 |
+| D3 | T4 ↔ Диадок docs | Inline limit “500 KB” implemented as 500 000 raw bytes; unknown whether KB = 1000/1024 and whether counted before/after base64 | Keep conservative threshold; check in S1 live run |
+| D4 | T3 ↔ Диадок | `409` from `PostMessage` does not distinguish “duplicate operation” from “recipient forbids”; only response text differs | T5 decides by `DiadocConflictError.body`; capture real texts in S1 live run |
+| D5 | T3 | Request/response shapes of `CanPostMessage`, `V3/PostMessage`, `V3/GetDocument` are from docs only, never live | S1 live run / T6 |
+| D6 | T2 | Not covered: real `.cer` whose key is not installed on the server | Add in F2 or T6 |

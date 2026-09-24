@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Proof of concept. Scaffold is in place (`src/{signer,diadoc,utd,pipeline}/index.ts` are empty stubs). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
+Proof of concept. Implemented: `src/signer` (КриптоАРМ Server signer), `src/diadoc` (auth + API client), `src/utd` (УПД parsing and attachment); `src/pipeline` is still a stub (T5). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
 
 - Task DAG, per-task status and done-criteria: `docs/plan.md` (source of truth for the Orca worktree tree; the `graph-root` worktree is the root parent of every task worktree).
 - Research findings with sources (Диадок formats, signing infrastructure): `docs/research.md`.
@@ -32,7 +32,7 @@ Only public APIs of both systems are used. No database — state lives in Кри
   - lint (ESLint flat config, `strictTypeChecked` + Prettier check): `npm run lint`; autoformat: `npm run format`
   - unit tests (Vitest): `npm test`; watch: `npm run test:watch`
   - single test: `npm test -- src/scaffold.test.ts -t "resolves every"` (file path and/or `-t <name pattern>`)
-  - integration tests: *(planned — T6)*
+  - integration tests (opt-in, skipped without env): `CRYPTOARM_SERVER_URL=http://127.0.0.1:3037 CRYPTOARM_SERVER_API_KEY=… SIGNER_CERT_PATH=docker/cryptoarm-server/certs/cryptoarm.server.test.cer npm test -- src/signer/server-cms-signer.integration.test.ts`; full e2e *(planned — T6)*
   - local environment: `docker compose up` (root `docker-compose.yml`; the КриптоАРМ Server service is `include`d from `docker/cryptoarm-server`).
   - КриптоАРМ Server: smoke `scripts/smoke-server.sh`; shell tests `scripts/test/*.test.sh`.
 - КриптоАРМ Server stand (details): `docker/cryptoarm-server/` (see its README); smoke `scripts/smoke-server.sh`; shell tests `scripts/test/*.test.sh`.
