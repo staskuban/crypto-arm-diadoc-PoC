@@ -56,3 +56,11 @@ export class DiadocAuthError extends Error {
     this.oauthError = oauthError;
   }
 }
+
+/** Missing or invalid Diadoc settings in env. Never carries secret values. */
+export class DiadocConfigError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'DiadocConfigError';
+  }
+}

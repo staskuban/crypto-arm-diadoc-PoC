@@ -43,9 +43,23 @@ export interface PostMessageOptions {
   maxAttempts?: number;
 }
 
+export interface ShelfUploadOptions {
+  /** With the dot, e.g. `.xml`: only affects the name of a downloaded file. */
+  fileExtension?: string;
+}
+
+/**
+ * V2/ShelfUpload takes the whole file in one request up to 3 MB (http/ShelfUpload.html). Assumption:
+ * MB = 10^6 bytes, the stricter reading. Larger files need ShelfUploadPartInit/ShelfUploadPart, not
+ * implemented.
+ */
+export const SHELF_UPLOAD_MAX_BYTES = 3_000_000;
+
 type Query = Record<string, string>;
+type Body = { data: string; type: string } | { data: Buffer; type: string };
 
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+const BINARY_CONTENT_TYPE = 'application/octet-stream';
 const DEFAULT_POST_ATTEMPTS = 10;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -80,7 +94,7 @@ export class DiadocClient {
   }
 
   async canPostMessage(prototype: MessagePrototype): Promise<MessageValidationResult> {
-    const res = await this.send('POST', '/CanPostMessage', {}, JSON.stringify(prototype));
+    const res = await this.send('POST', '/CanPostMessage', {}, json(prototype));
     return readJson<MessageValidationResult>(res, 'POST', '/CanPostMessage');
   }
 
@@ -96,7 +110,7 @@ export class DiadocClient {
         `PostMessage maxAttempts must be an integer >= 1, got ${String(maxAttempts)}`,
       );
     }
-    const body = JSON.stringify(toWireMessage(message));
+    const body = json(toWireMessage(message));
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const res = await this.send('POST', '/V3/PostMessage', { operationId: o.operationId }, body);
       if (res.status !== 204) return readJson<Message>(res, 'POST', '/V3/PostMessage');
@@ -105,6 +119,37 @@ export class DiadocClient {
       }
     }
     throw new DiadocOperationPendingError(o.operationId, maxAttempts);
+  }
+
+  /**
+   * V2/ShelfUpload: stores `content` for `SignedContent.NameOnShelf` and returns the generated name.
+   * Not idempotent (each call makes a new name), which is harmless: an unused shelf file is not sent.
+   */
+  async shelfUpload(content: Buffer, o: ShelfUploadOptions = {}): Promise<string> {
+    const path = '/V2/ShelfUpload';
+    if (content.length === 0) throw new Error('ShelfUpload content is empty');
+    if (content.length > SHELF_UPLOAD_MAX_BYTES) {
+      throw new Error(
+        `ShelfUpload takes at most ${String(SHELF_UPLOAD_MAX_BYTES)} bytes in one request, got ` +
+          `${String(content.length)}; ShelfUploadPartInit/ShelfUploadPart are not implemented`,
+      );
+    }
+    const query: Query = o.fileExtension === undefined ? {} : { fileExtension: o.fileExtension };
+    const res = await this.send('POST', path, query, { data: content, type: BINARY_CONTENT_TYPE });
+    const text = (await res.text()).trim();
+    // Documented as "a string"; tolerate both text/plain and a JSON string literal.
+    let name = text;
+    if (text.startsWith('"')) {
+      try {
+        name = String(JSON.parse(text));
+      } catch {
+        // keep the raw text; validated below
+      }
+    }
+    if (name === '' || /\s/.test(name)) {
+      throw new DiadocError('POST', path, res.status, `unexpected shelf name: ${text}`);
+    }
+    return name;
   }
 
   getDocument(ref: DocumentRef): Promise<Document> {
@@ -130,7 +175,7 @@ export class DiadocClient {
   }
 
   /** Retries once on 401 with a fresh token (the cached one may have been revoked). */
-  private async send(method: string, path: string, query: Query, body?: string): Promise<Response> {
+  private async send(method: string, path: string, query: Query, body?: Body): Promise<Response> {
     const url = new URL(this.baseUrl + path);
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
 
@@ -153,21 +198,23 @@ export class DiadocClient {
     method: string,
     url: URL,
     token: string,
-    body: string | undefined,
+    body: Body | undefined,
   ): Promise<Response> {
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
       accept: JSON_CONTENT_TYPE,
     };
-    if (body !== undefined) headers['content-type'] = JSON_CONTENT_TYPE;
+    if (body !== undefined) headers['content-type'] = body.type;
     return this.fetchFn(url.href, {
       method,
       headers,
       signal: AbortSignal.timeout(this.timeoutMs),
-      ...(body === undefined ? {} : { body }),
+      ...(body === undefined ? {} : { body: body.data }),
     });
   }
 }
+
+const json = (value: unknown): Body => ({ data: JSON.stringify(value), type: JSON_CONTENT_TYPE });
 
 /** The posted document is the Attachment entity without a parent (signatures hang under it). */
 export function findDocumentEntity(message: Message): Entity | undefined {

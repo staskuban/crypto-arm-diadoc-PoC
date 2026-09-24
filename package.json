@@ -14,7 +14,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "cli": "node --env-file-if-exists=.env dist/cli.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Proof of concept. Implemented: `src/signer` (КриптоАРМ Server signer), `src/diadoc` (auth + API client), `src/utd` (УПД parsing and attachment), `src/asn1` (BER → DER for the CMS from КриптоАРМ Server); `src/pipeline` is still a stub (T5). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
+Proof of concept. Implemented: `src/signer` (КриптоАРМ Server signer), `src/diadoc` (auth + API client), `src/utd` (УПД parsing and attachment), `src/asn1` (BER → DER for the CMS from КриптоАРМ Server), `src/pipeline` (`sendUtd`: parse → sign → verify → CanPostMessage → ShelfUpload/PostMessage → status polling) and the CLI `src/cli.ts`. The Диадок side has never run live (no credentials; T6). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
 
 - Task DAG, per-task status and done-criteria: `docs/plan.md` (source of truth for the Orca worktree tree; the `graph-root` worktree is the root parent of every task worktree).
 - Research findings with sources (Диадок formats, signing infrastructure): `docs/research.md`.
@@ -32,6 +32,7 @@ Only public APIs of both systems are used. No database — state lives in Кри
   - lint (ESLint flat config, `strictTypeChecked` + Prettier check): `npm run lint`; autoformat: `npm run format`
   - unit tests (Vitest): `npm test`; watch: `npm run test:watch`
   - single test: `npm test -- src/scaffold.test.ts -t "resolves every"` (file path and/or `-t <name pattern>`)
+  - CLI (after `npm run build`; loads `./.env` if present, see `.env.example`): `npm run cli -- send <ИдФайл>.xml [--no-precheck]` → JSON result on stdout, progress on stderr; exit 0 posted (status success or still pending), 1 failed (stderr has `[CODE]` from `PipelineError`), 2 usage, 3 posted but `DocflowStatus` is an error, 4 posted but no document entity (messageId on stderr). Prefer `DIADOC_REFRESH_TOKEN_FILE` (rotated tokens are written back, checked for writability at start); run one process at a time per refresh token
   - integration tests (opt-in, skipped without env): `CRYPTOARM_SERVER_URL=http://127.0.0.1:3037 CRYPTOARM_SERVER_API_KEY=… SIGNER_CERT_PATH=docker/cryptoarm-server/certs/cryptoarm.server.test.cer npm test -- src/signer/server-cms-signer.integration.test.ts`; full e2e *(planned — T6)*
   - local environment: `docker compose up` (root `docker-compose.yml`; the КриптоАРМ Server service is `include`d from `docker/cryptoarm-server`).
   - КриптоАРМ Server: smoke `scripts/smoke-server.sh`; shell tests `scripts/test/*.test.sh`.
@@ -76,6 +77,7 @@ Git: default branch is `master` (not `main`). The stash stack is shared across w
 - Test space: OIDC scope `Diadoc.PublicAPI.Staging` (prod: `Diadoc.PublicAPI`); two test boxes created via the docs form and added as counteragents to each other.
 - Sending: `PostMessage (V3)` with `MessageToPost { FromBoxId, ToBoxId, DocumentAttachments[] }`, each attachment has `TypeNamedId`, `Function`, `Version` and `SignedContent { Content, Signature }`. `Signature` is CMS SignedData in DER, separate from `Content` (i.e. **detached**; the official C# SDK signs with detached=true). `Content` inline only if < 500 KB, otherwise `ShelfUpload` + `NameOnShelf`; 70 MB per request. Pre-check with `CanPostMessage`. Status via `GetDocument` → `DocflowStatus`. `SignWithTestSignature` exists for test runs.
 - УПД (verified): `TypeNamedId = "UniversalTransferDocument"`, `Function` ∈ `СЧФ | ДОП | СЧФДОП | СвРК | СвЗК`, `Version = utd970_05_03_01` (`utd970_05_02_01` is obsolete). Take values from `GetDocumentTypes (V3)` and tolerate unknown versions. The ФНС XSD is `windows-1251` and requires file name == `@ИдФайл` — sign and send the exact same bytes, never re-encode. Signer block (universal format) must be filled **before** signing.
+- Pipeline decisions (T5): `operationId` = SHA-256 over boxes + file name + content (not the signature, which changes on re-signing), so re-running `send` for the same file sends the same `operationId`; whether Диадок replays the original message for a different body is **unverified** (D7). `409` texts are classified only in `src/pipeline/conflict.ts` (unverified, D4). Content ≥ 500 000 B goes through `V2/ShelfUpload` (single request ≤ 3 000 000 B); larger → `CONTENT_TOO_LARGE`, chunked upload not implemented. Status polling never throws after a successful post: it returns `outcome` `success | error | pending` with the ids.
 - Open: whether Диадок test boxes accept a signature from the КриптоПро test CA (spike S1).
 
 ## Secrets

@@ -8,6 +8,8 @@ coverage/
 .env
 .env.*
 !.env.example
+# Diadoc refresh token persisted by the CLI (DIADOC_REFRESH_TOKEN_FILE) and its temp file
+.diadoc-refresh-token*
 *.pfx
 *.p12
 
