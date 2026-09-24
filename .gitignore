@@ -22,6 +22,10 @@ docker/cryptoarm-server/secrets/*
 !docker/cryptoarm-server/secrets/.gitkeep
 docker/cryptoarm-server/certs/**/*.cer
 
+# КриптоАРМ Документы stand: licence, API keys, generated passwords
+docker/cryptoarm-documents/secrets/*
+!docker/cryptoarm-documents/secrets/.gitkeep
+
 # Other key/cert material and КриптоПро key containers
 *.key
 *.pem

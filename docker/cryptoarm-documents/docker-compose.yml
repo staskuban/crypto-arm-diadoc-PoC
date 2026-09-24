@@ -1,0 +1,128 @@
+# КриптоАРМ Документы API as its own compose project, signing through an ALREADY RUNNING
+# КриптоАРМ Server stand (docker/cryptoarm-server). Based on upstream docker/docker-compose.yaml of
+# https://git.digtlab.ru/trusted/cryptoarm/documents/api (commit b167d46a); see README.md.
+#
+#   scripts/documents-secrets.sh                      # once: fills ./secrets (git-ignored)
+#   docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
+#   scripts/smoke-documents.sh                        # upload -> cloud-sign -> export -> verify
+#
+# This file never starts, builds or recreates the КриптоАРМ Server: it only joins the server's
+# compose network (SIGN_SERVICE_NETWORK) and calls it by container name (SIGN_SERVICE_URL).
+name: kryptoarm-diadoc-documents
+
+services:
+  documents-api:
+    image: ${DOCUMENTS_API_IMAGE:-registry.digtlab.ru/trusted/cryptoarm/documents/api:1.0.209@sha256:a0854a75c60b576cbd8989a992e96edf1d1d29003f7dea0eb3256630c69096d4}
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Secrets are read from ./secrets by start.sh (not env: they would show in `docker inspect`).
+    entrypoint: ['/bin/sh', '/usr/local/bin/documents-start.sh']
+    command: ['docker-entrypoint.sh', 'pm2-runtime', 'ecosystem.config.js']
+    ports:
+      # Loopback only: the API signs with the corporate keys of the КриптоАРМ Server.
+      - '127.0.0.1:${DOCUMENTS_API_PORT:-3040}:3000'
+    environment:
+      PORT: '3000'
+      HOST: 127.0.0.1:${DOCUMENTS_API_PORT:-3040}
+      POSTGRES_HOST: documents-db
+      POSTGRES_USER: documents
+      POSTGRES_DB: documents
+      # Local login only (POST /api/v1/login); no OIDC IdP on this stand.
+      OAUTH2_ENABLED: 'false'
+      ADMIN_LOGIN: ${DOCUMENTS_ADMIN_LOGIN:-admin}
+      # The admin's e-mail is also its cloud-sign identity (-> ca-stub/nginx.conf mapping).
+      ADMIN_EMAIL: ${DOCUMENTS_ADMIN_EMAIL:-server-test@documents.local}
+      MAIL_ADMIN_EMAILS: ${DOCUMENTS_ADMIN_EMAIL:-server-test@documents.local}
+      # Signing: corporate cloud signature through КриптоАРМ Server, key chosen by the CA stub.
+      SIGN_METHOD_CORP_CLOUD: 'true'
+      SIGN_METHOD_CRYPTOARM: 'true'
+      SIGN_METHOD_UPLOAD: 'true'
+      SIGN_METHOD_DSS: 'false'
+      SIGN_METHOD_GOS_KEY: 'false'
+      SIGN_METHOD_GOS_KEY_API: 'false'
+      SIGN_SERVICE_URL: ${SIGN_SERVICE_URL:-http://kryptoarm-diadoc-cryptoarm-server:3037}
+      CA_API_URI: http://ca-stub:8080
+      VERIFY_SIGNATURE_AFTER_RECEIVE: 'true'
+      # УПД are XML; the upstream default list has no xml.
+      ALLOWED_FILE_TYPES: ${DOCUMENTS_ALLOWED_FILE_TYPES:-pdf|txt|plain|xml|octet-stream}
+      MAX_FILE_SIZE: '50'
+      DEFAULT_APPLICATION_BALANCE: '10'
+      COMMAND_PROCESSING_TIMEOUT: '120000'
+      # No SMTP on the stand: no login mails, no licence-expiry mails.
+      MAIL_HOST: smtp.invalid
+      MAIL_PORT: '465'
+      MAIL_SECURE: 'true'
+      MAIL_FROM: no-reply@documents.local
+      MAIL_SEND_LOGIN_NOTIFICATIONS: 'false'
+      SIGNATURE_LICENSE_EXPIRY_NOTIFY_ENABLED: 'false'
+      SYSTEM_NAME: kryptoarm-diadoc Документы stand
+      SYSTEM_URL: http://127.0.0.1:${DOCUMENTS_API_PORT:-3040}
+    volumes:
+      - ./start.sh:/usr/local/bin/documents-start.sh:ro
+      - documents-uploads:/uploads
+      - type: bind
+        source: ./secrets
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [default, sign-service]
+    depends_on:
+      documents-db:
+        condition: service_healthy
+      ca-stub:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/api/v1/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  documents-db:
+    image: ${DOCUMENTS_DB_IMAGE:-postgres:14.4}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: documents
+      POSTGRES_DB: documents
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - documents-db:/var/lib/postgresql/data
+      - type: bind
+        source: ./secrets/postgres_password
+        target: /run/secrets/postgres_password
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U documents -d documents']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Stand-in for the corporate CA API (CA_API_URI): e-mail -> public .cer, see ca-stub/nginx.conf.
+  ca-stub:
+    image: ${DOCUMENTS_CA_STUB_IMAGE:-nginx:1.27-alpine}
+    restart: unless-stopped
+    volumes:
+      - ./ca-stub/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${SIGNER_CERTS_DIR:-../cryptoarm-server/certs}:/certs:ro
+
+volumes:
+  documents-uploads:
+  documents-db:
+
+networks:
+  # The network of the running КриптоАРМ Server stand (<its compose project>_default).
+  sign-service:
+    name: ${SIGN_SERVICE_NETWORK:-graph-root_default}
+    external: true
