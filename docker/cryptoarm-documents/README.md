@@ -44,6 +44,51 @@ Secrets are files in `./secrets`, mounted read-only at `/run/secrets`. `start.sh
 - `ca-stub` mounts the whole `SIGNER_CERTS_DIR` (the server's `certs/` includes `user/` for PIN-less PFX) but serves only the mapped `.cer` files; point `SIGNER_CERTS_DIR` at a directory with only the `.cer` files if `certs/user` holds real keys. `postgres`/`nginx` images are pinned by tag only.
 - `smoke-documents.sh` with `DOCUMENTS_SIGNER_EMAIL` resets that user's password on every run (`PUT /api/v1/users/{id} {password}` keeps login and e-mail — verified): test stands only.
 
+## Container hardening
+
+All three containers run with `read_only: true` and CPU/memory/PID limits (I6). The writable paths were found with
+`docker diff` on a running stand after a smoke run.
+
+| Service         | Writable                                                                                  | Limits (env override, default)                                                             |
+| --------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `documents-api` | volumes `documents-uploads` (`/uploads`), `documents-logs` (`/logs`); tmpfs `/tmp` 128 MB | `DOCUMENTS_API_CPUS` 1, `DOCUMENTS_API_MEMORY` 1g, `DOCUMENTS_API_PIDS` 256                |
+| `documents-db`  | volume `documents-db`; tmpfs `/run/postgresql` (socket, lock), `/tmp`                     | `DOCUMENTS_DB_CPUS` 1, `DOCUMENTS_DB_MEMORY` 512m, `DOCUMENTS_DB_PIDS` 128                 |
+| `ca-stub`       | tmpfs `/var/cache/nginx`, `/run` (`nginx.pid`)                                            | `DOCUMENTS_CA_STUB_CPUS` 0.25, `DOCUMENTS_CA_STUB_MEMORY` 64m, `DOCUMENTS_CA_STUB_PIDS` 32 |
+
+Measured on the throwaway stand: API ~120–170 MiB, 12 PIDs; db ~30 MiB; ca-stub ~7 MiB, 9 PIDs (nginx starts one
+worker per host CPU, so on a host with more than ~30 CPUs raise `DOCUMENTS_CA_STUB_PIDS`). A `*_CPUS` value above the CPUs of the Docker VM fails the start. The tmpfs `/run/postgresql` is owned by uid/gid 999 (Debian `postgres` image); an alpine image (uid 70) needs another value.
+
+**No pm2 (D21).** Upstream runs `pm2-runtime ecosystem.config.js`: one fork-mode instance of `dist/main.js`, with
+copies of its output in `/logs/app-out.log` / `app-err.log`. pm2 keeps its pids, sockets and the `pm2-logrotate`
+module from the image in `/root/.pm2`. A tmpfs there would hide the module; a writable volume would keep a stale copy
+across image upgrades. So the stand runs `node dist/main.js` directly. The app log goes to stdout (`docker logs`),
+and a crash restarts the container (`restart: unless-stopped`) instead of pm2 restarting the process. The app's own
+winston files (`/logs/application-<date>.log`, 20 MB × 14 days) go to the `documents-logs` volume. `docker stop` takes ~1 s.
+`nginx`'s entrypoint logs `can not modify /etc/nginx/conf.d/default.conf (read-only file system?)`: expected, the
+config is mounted read-only anyway.
+
+**Rollout on the shared stand** (after merging I6 into `graph-root`; recreates all three containers, the API is
+down for ~20–30 s, so warn T7):
+
+```sh
+docker cp kryptoarm-diadoc-i2-documents-api-1:/logs ~/documents-logs-pre-i6    # optional, outside the repo: old logs live in the container layer
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml --dry-run up -d  # 3 x Recreate
+docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
+docker inspect -f '{{.Name}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}}' \
+  $(docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml ps -q)
+scripts/smoke-documents.sh                                                      # admin -> cryptoarm.server.test.cer
+DOCUMENTS_SIGNER_EMAIL=o2-platforma@documents.local CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer \
+  DATA_FILE=src/utd/fixtures/<ИдФайл>.xml scripts/smoke-documents.sh
+```
+
+The volumes `documents-db` and `documents-uploads` are kept, and so are users, documents and signatures. The
+compose file runs neither `build` nor `pull` for the API: its image is pinned by digest and already present. The
+order relative to the server rollout does not matter.
+
+**Rollback:** `git checkout <commit before the I6 merge> -- docker/cryptoarm-documents/docker-compose.yml`, then
+the same `up -d --wait`; commit the restored file (or revert the merge) in `graph-root`. The images do not change, so there is no image to restore. The unused volume
+`kryptoarm-diadoc-i2_documents-logs` can be removed with `docker volume rm`.
+
 ## How `cloud-sign` picks the key
 
 `POST /api/v1/signatures/cloud-sign/{documentId}` (body `{ "pin"?: string }`) takes the **e-mail of the logged-in user**. It then calls `GET {CA_API_URI}/cert/{email}?format=pfx`, with header `x-api-key: $CA_API_TOKEN` when set. The response body becomes the `cert` of `POST {SIGN_SERVICE_URL}/cms/sign`. For `application/json` the API reads the field `pfx`, `cert` or `data`; otherwise it base64-encodes the raw body. `pin` goes as `password`. The request sets neither `detached` nor `cadesStandard`, so the server defaults apply: detached `CAdES-BES`. The API key for the server is `SIGN_SERVICE_API_KEY`. The profile flag `corpCloudCertAvailable` comes from `GET {CA_API_URI}/cert/{email}/exists`, which must return `{exists, has_pfx, has_private_key}` all true.

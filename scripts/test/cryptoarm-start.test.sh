@@ -50,8 +50,10 @@ fail() {
 
 # Fresh container layout for every case.
 reset() {
-  rm -rf "$work/c" && mkdir -p "$work/c"/{store,store_default,certs/root,certs/user,secrets,lic}
+  rm -rf "$work/c" && mkdir -p "$work/c"/{store,store_default,conf,conf_default/apparmor.d,certs/root,certs/user,secrets,lic}
   echo "default" >"$work/c/store_default/config.ini"
+  echo "csp config" >"$work/c/conf_default/config64.ini"
+  echo "profile" >"$work/c/conf_default/apparmor.d/p"
   : >"$work/calls"
   rm -f "$work/child.args" "$work/child.env"
 }
@@ -62,6 +64,7 @@ run_start() { # extra env assignments...
     CERTMGR_BIN="$work/bin/certmgr" CPCONFIG_BIN="$work/bin/cpconfig" \
     TSPUTIL_BIN="$work/bin/tsputil" OCSPUTIL_BIN="$work/bin/ocsputil" \
     CSP_STORE_DIR="$work/c/store" CSP_STORE_DEFAULT_DIR="$work/c/store_default" \
+    CSP_CONFIG_DIR="$work/c/conf" CSP_CONFIG_DEFAULT_DIR="$work/c/conf_default" \
     CERTS_DIR="$work/c/certs" SECRETS_DIR="$work/c/secrets" TRUSTED_LICENSE_DIR="$work/c/lic" \
     TRUSTED_LICENSE="" CRYPTOPRO_LICENSE="" \
     "$@" "${TEST_SH:-sh}" "$start" child arg1 "arg two" >"$work/out" 2>&1
@@ -86,11 +89,34 @@ reset
 echo "kept" >"$work/c/store/existing"
 run_start
 check "does not seed a non-empty CSP store" test ! -e "$work/c/store/config.ini"
+check "an empty CSP config dir is seeded even when the store is not" test -f "$work/c/conf/config64.ini"
 check "warns that TRUSTED_LICENSE is empty" grep -q "TRUSTED_LICENSE is empty" "$work/out"
 check "keeps TRUSTED_LICENSE / CRYPTOPRO_LICENSE defined for the server" \
   grep -qx "TRUSTED_LICENSE=" "$work/child.env"
 check "CPCONFIG: no license -> trial, license state is shown" called "cpconfig -license -view"
 check "CPCONFIG: no license -> -set not called" bash -c "! grep -q -- '-license -set' '$work/calls'"
+
+# 1a. CSP configuration (/etc/opt/cprocsp): a tmpfs under read_only is seeded from the image copy
+# before cpconfig runs, so `cpconfig -license -set` can write license.ini.
+reset
+run_start
+check "seeds an empty CSP config dir from the image copy" \
+  bash -c "cmp -s '$work/c/conf_default/config64.ini' '$work/c/conf/config64.ini' && test -f '$work/c/conf/apparmor.d/p'"
+check "logs the CSP config seeding" grep -q "seeding empty .*conf from" "$work/out"
+reset
+echo "custom" >"$work/c/conf/config64.ini"
+run_start
+check "does not seed a non-empty CSP config dir" test "$(cat "$work/c/conf/config64.ini")" = custom
+reset
+rm -rf "$work/c/conf_default"
+check "no image copy of the CSP config: the start continues" run_start
+check "no image copy of the CSP config: nothing seeded" test -z "$(ls -A "$work/c/conf")"
+check "no image copy of the CSP config: warns" grep -q "WARNING: .*conf is empty" "$work/out"
+reset
+chmod 0644 "$work/c/conf_default/config64.ini"
+run_start
+check "seeding keeps the image modes despite umask 077" \
+  test "$(stat -c '%a' "$work/c/conf/config64.ini" 2>/dev/null || stat -f '%Lp' "$work/c/conf/config64.ini")" = 644
 
 # 2. Trusted license: env (legacy), file via SECRETS_DIR, explicit *_FILE.
 reset

@@ -20,6 +20,19 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Read-only root filesystem (I6). Writable: the bind mount of the CSP store (keys) and these
+    # tmpfs (lost on every restart; start.sh refills them). Found with `docker diff` on a running stand.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777 # os.tmpdir(): temporary PFX files of /cms/sign with a .pfx cert
+      - /var/lib/cryptoarm-server:size=16m,mode=0700 # cash.json (PKI store cache, symlinked from /)
+      - /etc/opt/Trusted:size=1m,mode=0700 # license.lic, written by start.sh
+      - /etc/opt/cprocsp:size=16m,mode=0755 # CSP config incl. license.ini, seeded by start.sh
+      - /var/cache/fontconfig:size=16m,mode=0755 # font cache of the PDF reports
+    # Resource limits (I6); tmpfs contents count towards the memory limit.
+    cpus: ${CRYPTOARM_SERVER_CPUS:-2}
+    mem_limit: ${CRYPTOARM_SERVER_MEMORY:-2g}
+    pids_limit: ${CRYPTOARM_SERVER_PIDS:-256}
     ports:
       # Loopback only: the service signs with the keys installed in the container.
       - '127.0.0.1:${CRYPTOARM_SERVER_PORT:-3037}:3037'
@@ -37,8 +50,12 @@ services:
         bind:
           create_host_path: false
     healthcheck:
-      # /health/memory is excluded from API key auth upstream.
-      test: ['CMD', 'curl', '-fsS', '-o', '/dev/null', 'http://127.0.0.1:3037/health/memory']
+      # /health/memory is excluded from API key auth upstream. The config64.ini check catches an image
+      # older than this file (I6): its start.sh does not seed the tmpfs /etc/opt/cprocsp, so CSP cannot
+      # sign although the API answers.
+      test:
+        - CMD-SHELL
+        - test -s /etc/opt/cprocsp/config64.ini && curl -fsS -o /dev/null http://127.0.0.1:3037/health/memory
       interval: 15s
       timeout: 5s
       retries: 5
