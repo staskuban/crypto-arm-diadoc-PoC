@@ -174,6 +174,20 @@ describe('cli', () => {
     expect(err.join('')).toMatch(/^error \[SIGNER_CONFIG\] CRYPTOARM_SERVER_URL is not set/);
   });
 
+  it.each([
+    [{ SIGNER_KIND: 'documents' }, /^error \[SIGNER_CONFIG\] DOCUMENTS_URL is not set/],
+    [
+      { SIGNER_KIND: 'hsm' },
+      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server" or "documents"/,
+    ],
+  ])('default signer factory honours SIGNER_KIND %j', async (extra, message) => {
+    const { deps, err } = setup(undefined, { ...ENV, ...extra });
+    const rest: CliDeps = { ...deps };
+    delete rest.createSigner;
+    expect(await main(['send', '/data/f.xml'], rest)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(message);
+  });
+
   it('prints [DIADOC_CONFIG] when the Diadoc client cannot be set up', async () => {
     const { deps, err } = setup();
     deps.createDiadoc = () => Promise.reject(new Error('DIADOC_CLIENT_ID is not set'));

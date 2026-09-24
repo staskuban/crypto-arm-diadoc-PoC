@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server and posts it to Diadoc.
+// Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server (or КриптоАРМ
+// Документы cloud-sign, SIGNER_KIND=documents) and posts it to Diadoc.
 // Settings come from env (see .env.example); `npm run cli -- send <file.xml>` loads ./.env.
 import { readFile as fsReadFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -21,7 +22,7 @@ import {
   type PipelineDiadoc,
   type SendUtdResult,
 } from './pipeline/index.js';
-import { loadServerCmsSignerOptions, ServerCmsSigner, type Signer } from './signer/index.js';
+import { createSignerFromEnv, type Signer } from './signer/index.js';
 
 export type CliEnv = Record<string, string | undefined>;
 
@@ -53,7 +54,8 @@ export interface CliDeps {
 
 const USAGE = `Usage: cli send <file.xml> [--no-precheck] [--resend[=<salt>]]
 
-Signs the УПД with КриптоАРМ Server and posts it to Контур.Диадок.
+Signs the УПД with КриптоАРМ Server (SIGNER_KIND=documents: КриптоАРМ Документы cloud-sign)
+and posts it to Контур.Диадок.
 The file name must be ИдФайл + ".xml"; the bytes are signed and sent unchanged.
 Sending the same file again reuses its operationId (Diadoc treats it as the same send).
 --resend posts it once more on purpose under a new operationId (random salt, printed on stderr);
@@ -147,8 +149,9 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   }
 }
 
-async function createSigner(env: CliEnv): Promise<Signer> {
-  return new ServerCmsSigner(await loadServerCmsSignerOptions(env));
+/** SIGNER_KIND=server (default) or documents, see createSignerFromEnv. */
+function createSigner(env: CliEnv): Promise<Signer> {
+  return createSignerFromEnv(env);
 }
 
 /**
