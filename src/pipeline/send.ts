@@ -10,6 +10,7 @@ import {
   type DocflowStatus,
   type MessageValidationError,
 } from '../diadoc/index.js';
+import { Asn1Error } from '../asn1/index.js';
 import type { Signer } from '../signer/index.js';
 import {
   buildUtdAttachment,
@@ -24,6 +25,13 @@ import { toDocumentAttachment, toMessagePrototype } from './attachment.js';
 import { classifyConflict } from './conflict.js';
 import { PipelineError, type PipelineErrorCode, type PipelineStep } from './errors.js';
 import { operationIdFor } from './operation-id.js';
+import {
+  classifyVerifyFailure,
+  cmsPolicyViolations,
+  readSignerCertificate,
+  validityProblem,
+  verifiedSignerViolations,
+} from './signature-policy.js';
 import {
   DEFAULT_POLL_OPTIONS,
   pollDocflowStatus,
@@ -131,23 +139,57 @@ export async function sendUtd(
     `parsed ${utd.fileName}: ${utd.function} ${utd.version}, ${String(utd.content.length)} bytes`,
   );
 
-  // 2–3. Sign and check our own signature before anything leaves the building.
+  // 2–3. Sign and check our own signature before anything leaves the building: the structure
+  // (detached, one signer, the configured certificate) locally, then the math and chain upstream.
+  const now = deps.now ?? Date.now;
+  const certificate = step('sign', 'CERTIFICATE_INVALID', () =>
+    readSignerCertificate(deps.signer.certificate),
+  );
+  const expired = validityProblem(certificate, now());
+  if (expired !== undefined) {
+    throw new PipelineError('CERTIFICATE_INVALID', 'sign', expired, { operationId });
+  }
   const { signature } = await stepAsync('sign', 'SIGN_FAILED', () =>
     deps.signer.sign(utd.content, callOptions),
   );
   log(`signed: ${String(signature.length)} bytes of CMS`);
+  let structure: string[];
+  try {
+    structure = cmsPolicyViolations(signature, certificate);
+  } catch (error) {
+    if (!(error instanceof Asn1Error)) throw error;
+    throw new PipelineError(
+      'INVALID_SIGNATURE',
+      'policy',
+      `the signer returned no DER CMS SignedData: ${error.message}`,
+      { cause: error, operationId },
+    );
+  }
+  if (structure.length > 0) {
+    throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'policy', structure.join('; '), {
+      operationId,
+    });
+  }
   const verification = await stepAsync('verify', 'VERIFY_FAILED', () =>
     deps.signer.verify(utd.content, signature, callOptions),
   );
   if (!verification.valid) {
+    const failed = classifyVerifyFailure(verification, certificate, now());
     throw new PipelineError(
-      'SIGNATURE_INVALID',
+      failed.code,
       'verify',
-      `signature over ${utd.fileName} does not verify${verification.reason ? `: ${verification.reason}` : ''}`,
-      { details: verification.signers },
+      `signature over ${utd.fileName} is rejected: ${failed.message}`,
+      { details: verification.signers, operationId },
     );
   }
-  log('verified');
+  const verified = verifiedSignerViolations(verification, certificate);
+  if (verified.length > 0) {
+    throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'verify', verified.join('; '), {
+      details: verification.signers,
+      operationId,
+    });
+  }
+  log(`verified: signer ${certificate.thumbprint}`);
 
   // 4. Domain attachment (checks DER framing).
   const attachment = step('attach', 'INVALID_SIGNATURE', () =>
@@ -216,7 +258,7 @@ export async function sendUtd(
     {
       getDocument: (ref) => deps.diadoc.getDocument(ref),
       sleep: deps.sleep ?? ((ms) => delay(ms, undefined, callOptions)),
-      now: deps.now ?? Date.now,
+      now,
       signal,
     },
     { ...DEFAULT_POLL_OPTIONS, ...options.poll },

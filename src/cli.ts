@@ -69,10 +69,14 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   }
 
   try {
-    const config = loadPipelineConfig(deps.env);
-    const content = await deps.readFile(path);
-    const signer = await (deps.createSigner ?? createSigner)(deps.env);
-    const diadoc = await (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr);
+    const config = await setupStep('PIPELINE_CONFIG', () => loadPipelineConfig(deps.env));
+    const content = await setupStep('READ_FAILED', () => deps.readFile(path));
+    const signer = await setupStep('SIGNER_CONFIG', () =>
+      (deps.createSigner ?? createSigner)(deps.env),
+    );
+    const diadoc = await setupStep('DIADOC_CONFIG', () =>
+      (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr),
+    );
     const result = await (deps.send ?? sendUtd)(
       { fileName: basename(path), content },
       {
@@ -93,7 +97,10 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     deps.stdout(`${JSON.stringify(printable(result), null, 2)}\n`);
     return result.outcome === 'error' ? EXIT.docflowError : EXIT.ok;
   } catch (error) {
-    deps.stderr(`${describeFailure(error)}\n`);
+    const interrupted = deps.signal?.aborted === true && error === deps.signal.reason;
+    deps.stderr(
+      `${interrupted ? `error [INTERRUPTED] ${describe(error)}` : describeFailure(error)}\n`,
+    );
     return error instanceof PipelineError && error.code === 'NO_DOCUMENT_ENTITY'
       ? EXIT.postedUntracked
       : EXIT.failed;
@@ -176,7 +183,34 @@ function describeFailure(error: unknown): string {
     ].filter(Boolean);
     return `error [${error.code}] ${error.message}${ids.length > 0 ? ` (${ids.join(', ')})` : ''}`;
   }
-  return `error: ${error instanceof Error ? error.message : String(error)}`;
+  if (error instanceof CliSetupError) return `error [${error.code}] ${error.message}`;
+  return `error [UNEXPECTED] ${describe(error)}`;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Codes for failures before the pipeline starts, printed like `PipelineError` codes. */
+export type CliSetupCode = 'PIPELINE_CONFIG' | 'READ_FAILED' | 'SIGNER_CONFIG' | 'DIADOC_CONFIG';
+
+class CliSetupError extends Error {
+  override readonly name = 'CliSetupError';
+
+  constructor(
+    readonly code: CliSetupCode,
+    options: { cause: unknown },
+  ) {
+    super(options.cause instanceof Error ? options.cause.message : String(options.cause), options);
+  }
+}
+
+async function setupStep<T>(code: CliSetupCode, fn: () => T | Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    throw new CliSetupError(code, { cause: error });
+  }
 }
 
 const entry = process.argv[1];

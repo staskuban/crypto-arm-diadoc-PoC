@@ -107,11 +107,11 @@ describe('cli', () => {
   it('exits 1 on an unreadable file or bad config', async () => {
     const missing = setup();
     expect(await main(['send', '/nope.xml'], missing.deps)).toBe(EXIT.failed);
-    expect(missing.err.join('')).toMatch(/ENOENT/);
+    expect(missing.err.join('')).toMatch(/^error \[READ_FAILED\] .*ENOENT/);
 
     const noBoxes = setup(undefined, { DIADOC_FROM_BOX_ID: 'from', DIADOC_TO_BOX_ID: '' });
     expect(await main(['send', '/data/f.xml'], noBoxes.deps)).toBe(EXIT.failed);
-    expect(noBoxes.err.join('')).toMatch(/DIADOC_TO_BOX_ID is not set/);
+    expect(noBoxes.err.join('')).toMatch(/^error \[PIPELINE_CONFIG\] DIADOC_TO_BOX_ID is not set/);
   });
 
   it('default factories report missing signer env without any network call', async () => {
@@ -120,7 +120,32 @@ describe('cli', () => {
     delete rest.createSigner;
     delete rest.createDiadoc;
     expect(await main(['send', '/data/f.xml'], rest)).toBe(EXIT.failed);
-    expect(err.join('')).toMatch(/CRYPTOARM_SERVER_URL is not set/);
+    expect(err.join('')).toMatch(/^error \[SIGNER_CONFIG\] CRYPTOARM_SERVER_URL is not set/);
+  });
+
+  it('prints [DIADOC_CONFIG] when the Diadoc client cannot be set up', async () => {
+    const { deps, err } = setup();
+    deps.createDiadoc = () => Promise.reject(new Error('DIADOC_CLIENT_ID is not set'));
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[DIADOC_CONFIG\] DIADOC_CLIENT_ID is not set/);
+  });
+
+  it('prints [INTERRUPTED] when aborted by a signal', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGTERM)');
+    const { deps, err } = setup(() => {
+      controller.abort(reason);
+      return Promise.reject(reason);
+    });
+    deps.signal = controller.signal;
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[INTERRUPTED\] interrupted \(SIGTERM\)/);
+  });
+
+  it('prints [UNEXPECTED] for a failure outside the pipeline error codes', async () => {
+    const { deps, err } = setup(() => Promise.reject(new Error('boom')));
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[UNEXPECTED\] boom/);
   });
 });
 
