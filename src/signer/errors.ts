@@ -28,6 +28,15 @@ export class SignerHttpError extends SignerError {
   }
 }
 
+/**
+ * The certificate's private key is not installed in the server store (`uMy`). Detected from the
+ * КриптоАРМ Server message text, the only signal it gives (HTTP 400, no error code). Fix the
+ * server key store or `SIGNER_CERT_PATH`; retrying does not help.
+ */
+export class SignerKeyNotFoundError extends SignerHttpError {
+  override name = 'SignerKeyNotFoundError';
+}
+
 /** The request did not complete within the configured timeout. */
 export class SignerTimeoutError extends SignerError {
   override name = 'SignerTimeoutError';

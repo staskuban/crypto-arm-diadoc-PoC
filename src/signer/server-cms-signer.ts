@@ -1,8 +1,10 @@
+import { Asn1Error, berToDer } from '../asn1/index.js';
 import { toDerCertificate } from './certificate.js';
 import {
   SignerConfigError,
   SignerError,
   SignerHttpError,
+  SignerKeyNotFoundError,
   SignerNetworkError,
   SignerResponseError,
   SignerTimeoutError,
@@ -19,6 +21,8 @@ const SIGNED_DATA_OID = Buffer.from('06092a864886f70d010702', 'hex');
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 /** Visible ASCII only: anything else is rejected by fetch with the value in the message. */
 const HEADER_TOKEN = /^[\x21-\x7e]+$/;
+/** КриптоАРМ Server 400 text when the certificate's key is not in `uMy` (seen 2026-09-24). */
+const KEY_NOT_FOUND = /закрытый ключ[^.]*не найден/i;
 
 export interface ServerCmsSignerOptions {
   /** КриптоАРМ Server base URL, e.g. `http://127.0.0.1:3037`. A path prefix is kept. */
@@ -82,11 +86,21 @@ export class ServerCmsSigner implements Signer {
     if (!BASE64.test(compact)) {
       throw new SignerResponseError('sign', '"cms" is not Base64');
     }
-    const signature = Buffer.from(compact, 'base64');
+    const raw = Buffer.from(compact, 'base64');
+    let signature: Buffer;
+    try {
+      signature = berToDer(raw);
+    } catch (error) {
+      if (error instanceof Asn1Error) {
+        throw new SignerResponseError('sign', `"cms" is not valid BER: ${error.message}`);
+      }
+      throw error;
+    }
     if (!isCmsSignedData(signature)) {
       throw new SignerResponseError('sign', '"cms" is not a CMS SignedData');
     }
-    return { signature };
+    // Диадок requires DER; the server emits BER with indefinite lengths (docs/plan.md D1).
+    return signature.equals(raw) ? { signature } : { signature, rawSignature: raw };
   }
 
   async verify(
@@ -153,12 +167,13 @@ export class ServerCmsSigner implements Signer {
     }
 
     if (!response.ok) {
-      throw new SignerHttpError(
-        operation,
-        response.status,
-        upstreamMessage(text),
-        response.headers.get('x-request-id') ?? undefined,
-      );
+      const message = upstreamMessage(text);
+      const requestId = response.headers.get('x-request-id') ?? undefined;
+      const HttpError =
+        response.status === 400 && KEY_NOT_FOUND.test(message)
+          ? SignerKeyNotFoundError
+          : SignerHttpError;
+      throw new HttpError(operation, response.status, message, requestId);
     }
     try {
       return JSON.parse(text) as unknown;
@@ -195,27 +210,15 @@ function parseBaseUrl(raw: string): URL {
 }
 
 /**
- * Checks the ContentInfo envelope: SEQUENCE spanning the whole buffer (definite length, or BER
- * indefinite length ending with end-of-contents, as КриптоПро emits) starting with the
- * pkcs7-signedData OID. The inner structure is left to the verifier.
+ * Checks the ContentInfo envelope: a SEQUENCE starting with the pkcs7-signedData OID. The input
+ * must come from `berToDer` (one well-formed element spanning the buffer), so the header is
+ * trusted. The rest is left to the verifier.
  */
-function isCmsSignedData(cms: Buffer): boolean {
-  if (cms.length < 2 || cms[0] !== 0x30) return false;
-  const first = cms[1] ?? 0;
-  let offset: number;
-  if (first === 0x80) {
-    offset = 2;
-    if (cms.length < 4 || cms.readUInt16BE(cms.length - 2) !== 0) return false;
-  } else if (first < 0x80) {
-    offset = 2;
-    if (offset + first !== cms.length) return false;
-  } else {
-    const count = first & 0x7f;
-    if (count > 4 || cms.length < 2 + count) return false;
-    offset = 2 + count;
-    if (offset + cms.readUIntBE(2, count) !== cms.length) return false;
-  }
-  return cms.subarray(offset, offset + SIGNED_DATA_OID.length).equals(SIGNED_DATA_OID);
+function isCmsSignedData(der: Buffer): boolean {
+  if (der[0] !== 0x30) return false;
+  const first = der[1] ?? 0;
+  const offset = first < 0x80 ? 2 : 2 + (first & 0x7f);
+  return der.subarray(offset, offset + SIGNED_DATA_OID.length).equals(SIGNED_DATA_OID);
 }
 
 function requireNonEmpty(operation: SignerOperation, value: Buffer, name: string): void {

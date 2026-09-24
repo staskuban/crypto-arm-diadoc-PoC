@@ -1,5 +1,6 @@
 // Input for a Diadoc PostMessage (V3) DocumentAttachment of a УПД, as a plain object with raw
 // bytes. The Diadoc client serialises it (base64 or ShelfUpload + NameOnShelf); no HTTP here.
+import { isDerFramed } from '../asn1/index.js';
 import { UtdError } from './errors.js';
 import type { UtdDocument, UtdFunction } from './parse.js';
 
@@ -46,8 +47,9 @@ export function buildUtdAttachment(
   if (document.content.length === 0) {
     throw new UtdError('INVALID_CONTENT', 'УПД content is empty');
   }
-  // CMS ContentInfo is a DER SEQUENCE; catches base64/PEM passed where DER is expected.
-  if (signature[0] !== 0x30) {
+  // CMS ContentInfo is a DER SEQUENCE; catches base64/PEM and BER framing (normalize with
+  // berToDer). A framing check only: SET OF order and value encodings are the signer's.
+  if (signature[0] !== 0x30 || !isDerFramed(signature)) {
     throw new UtdError('INVALID_SIGNATURE', 'Signature must be a DER-encoded CMS SignedData');
   }
   return {
