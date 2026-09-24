@@ -1,25 +1,41 @@
 # Based on upstream docker/docker-compose.yml of https://git.digtlab.ru/trusted/cryptoarm/server
 # (commit af98d55e1974b87275b7fef97a20a6c32fb6f63b). See README.md in this directory.
+#
+# Build and run are separate services (D8): `cryptoarm-server` has no `build` section and never pulls,
+# so `docker compose run --build app` (root compose file) cannot rebuild or recreate it. Build with
+#   docker compose -f docker/cryptoarm-server/docker-compose.yml build cryptoarm-server-image
+# then `up -d`. A throwaway stand next to the shared one: override CRYPTOARM_SERVER_IMAGE,
+# CRYPTOARM_CONTAINER_NAME, CRYPTOARM_SERVER_PORT and the project name (-p), see README.md.
 name: kryptoarm-diadoc-cryptoarm-server
 
 services:
   cryptoarm-server:
-    build:
-      context: .
-      platforms:
-        - linux/amd64
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:local}
+    pull_policy: never
     platform: linux/amd64
-    image: kryptoarm-diadoc/cryptoarm-server:local
-    container_name: kryptoarm-diadoc-cryptoarm-server
+    container_name: ${CRYPTOARM_CONTAINER_NAME:-kryptoarm-diadoc-cryptoarm-server}
     restart: unless-stopped
+    # tini as PID 1: forwards SIGTERM to the server and reaps certmgr/cpconfig children.
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Loopback only: the service signs with the keys installed in the container.
       - '127.0.0.1:${CRYPTOARM_SERVER_PORT:-3037}:3037'
+    # Non-secret settings only; secrets go into ./secrets (see .env.example, README.md).
     env_file:
       - .env
     volumes:
       - ./cert_storage:/var/opt/cprocsp/
       - ./certs:/certs:ro
+      # Licenses, API keys, PFX containers + PINs as files, read by start.sh.
+      - type: bind
+        source: ./secrets
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       # /health/memory is excluded from API key auth upstream.
       test: ['CMD', 'curl', '-fsS', '-o', '/dev/null', 'http://127.0.0.1:3037/health/memory']
@@ -27,3 +43,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+
+  # Build-only service: tags the image `cryptoarm-server` runs. The profile keeps it out of `up`/`run`;
+  # never start it (`--profile build up` would run a second, unconfigured server that exits).
+  cryptoarm-server-image:
+    profiles: [build]
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:local}

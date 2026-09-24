@@ -18,6 +18,8 @@ cryptopro/*.tgz
 docker/cryptoarm-server/cryptopro/*
 !docker/cryptoarm-server/cryptopro/.gitkeep
 docker/cryptoarm-server/cert_storage/
+docker/cryptoarm-server/secrets/*
+!docker/cryptoarm-server/secrets/.gitkeep
 docker/cryptoarm-server/certs/**/*.cer
 
 # Other key/cert material and КриптоПро key containers

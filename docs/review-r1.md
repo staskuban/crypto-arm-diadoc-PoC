@@ -68,7 +68,7 @@ How it was checked:
   - I3 (a new certificate) is the real mitigation and is time-critical.
   - The error message should say "chain invalid" vs "math invalid" explicitly.
 
-### M7. The КриптоАРМ Server base image is unpinned
+### M7. The КриптоАРМ Server base image is unpinned — **fixed in I5** (`server:1.4.25@sha256:065293ad…`, the digest of `latest` on 2026-09-24)
 - Where: `docker/cryptoarm-server/Dockerfile:8` (`FROM registry.digtlab.ru/trusted/cryptoarm/server:latest`).
 - The header (`Dockerfile:1-2`) and the README claim the files follow upstream commit `af98d55e`; `docs/research.md` names v1.4.25.
 - Scenario: a rebuild on another machine, or after an upstream push, silently changes behaviour the code relies on:
@@ -78,7 +78,7 @@ How it was checked:
   A replaced `latest` image also receives the PFX, PINs and licenses.
 - Fix: pin the tag and the digest (`server:1.4.25@sha256:…`).
 
-### M8. Keys, PINs and licenses travel via env and argv in the server container
+### M8. Keys, PINs and licenses travel via env and argv in the server container — **fixed in I5** where upstream allows (`start.sh`: `<VAR>_FILE` / `secrets/<var>` for licenses and `API_KEYS`, `secrets/*.pfx` + `.pin`; the КриптоАРМ license is written to `license.lic` without argv; `CERT_PFX_*` marked test-only; env still works). Residual: CSP/TSP/OCSP licenses and PINs stay in the argv of `cpconfig`/`tsputil`/`ocsputil`/`certmgr` at start (no stdin option); `API_KEYS` stays in the server's env (the server reads only env)
 - Where:
   - `docker/cryptoarm-server/docker-compose.yml:18-19` (`env_file`);
   - `docker/cryptoarm-server/.env.example:29-30` (`CERT_PFX_BASE64`, `CERT_PFX_PIN`);
@@ -95,16 +95,16 @@ How it was checked:
 
 ## Minor
 
-1. **Stand errors are swallowed.** `Dockerfile:37,40,49,65,67` all end in `2>/dev/null || true`. A broken PFX or a wrong PIN still gives a *healthy* container, and the first symptom is `SignerKeyNotFoundError` in the pipeline. Fix: log `certmgr` stderr (without the PIN).
-2. **PIN index shifts on an empty PFX element.** In `Dockerfile:56-71`, `idx=$((idx+1))` sits inside `[ -n "$pfx_b64" ] && { … }`. With `CERT_PFX_BASE64=a,,b`, element `b` gets PIN #2 instead of #3. Fix: increment outside the condition.
-3. **The CSP distribution stays in an image layer.** `Dockerfile:10` uses `ADD cryptopro /tmp/src`; the later `rm -rf` does not remove the layer. This matters if the image is ever pushed (I4). Fix: `RUN --mount=type=bind,…` or a multi-stage build.
-4. **No container hardening and a non-exec CMD.**
+1. **Fixed in I5** (`start.sh` logs `certmgr` output with the PIN redacted plus a failure count; the start continues). **Stand errors are swallowed.** `Dockerfile:37,40,49,65,67` all end in `2>/dev/null || true`. A broken PFX or a wrong PIN still gives a *healthy* container, and the first symptom is `SignerKeyNotFoundError` in the pipeline. Fix: log `certmgr` stderr (without the PIN).
+2. **Fixed in I5** (tested in `scripts/test/cryptoarm-start.test.sh`). **PIN index shifts on an empty PFX element.** In `Dockerfile:56-71`, `idx=$((idx+1))` sits inside `[ -n "$pfx_b64" ] && { … }`. With `CERT_PFX_BASE64=a,,b`, element `b` gets PIN #2 instead of #3. Fix: increment outside the condition.
+3. **Fixed in I5** (`RUN --mount=type=bind`; checked: no `linux-amd64_deb*` in the image). **The CSP distribution stays in an image layer.** `Dockerfile:10` uses `ADD cryptopro /tmp/src`; the later `rm -rf` does not remove the layer. This matters if the image is ever pushed (I4). Fix: `RUN --mount=type=bind,…` or a multi-stage build.
+4. **Mostly fixed in I5**: exec-form `ENTRYPOINT` + `init: true` (`docker stop` 0.7 s), `cap_drop: [ALL]` with no `cap_add`, `no-new-privileges`, no blank continuation lines. Not done: `read_only` rootfs + tmpfs, resource limits, a non-root user (CSP keys live in root's store). **No container hardening and a non-exec CMD.**
    - No `cap_drop: [ALL]`, `no-new-privileges`, `read_only` + tmpfs or resource limits; the server runs as root.
    - The shell-form `CMD` (`Dockerfile:27`) makes PID 1 a `sh`, so `docker stop` waits 10 s and then sends SIGKILL.
    - Blank continuation lines at `Dockerfile:35,42` trigger a Docker warning.
    - Mitigated today by the loopback-only port (compose:17).
-5. **Host file modes.** The local `.env` files and `certs/user/cryptoarm.server.test.pfx` (no PIN) are `0644`. Fix: `umask 077` in `scripts/fetch-test-certs.sh`, and recommend `chmod 600 .env` in the README.
-6. **API key in argv.** `scripts/smoke-server.sh:47` passes `-H "X-API-Key: $api_key"`, which shows up in `ps`. Fix: `curl -H @file`. Related: the server logs the first 8 characters of the API key on every request at the default `LOG_LEVEL=debug,…` (seen in `docker logs`; request bodies are *not* logged — checked with 3.9 MB requests). Default the stand to `log,warn,error`.
+5. **Fixed in I5** (`umask 077` in `fetch-test-certs.sh`: `.pfx` 0600, public `.cer` explicitly 0644; README says `chmod 600 .env`). **Host file modes.** The local `.env` files and `certs/user/cryptoarm.server.test.pfx` (no PIN) are `0644`. Fix: `umask 077` in `scripts/fetch-test-certs.sh`, and recommend `chmod 600 .env` in the README.
+6. **Fixed in I5** (`-H @file`; default `LOG_LEVEL=warn,error`: the key prefix is logged at the `log` level, not `debug`, so `log,warn,error` would still print it). **API key in argv.** `scripts/smoke-server.sh:47` passes `-H "X-API-Key: $api_key"`, which shows up in `ps`. Fix: `curl -H @file`. Related: the server logs the first 8 characters of the API key on every request at the default `LOG_LEVEL=debug,…` (seen in `docker logs`; request bodies are *not* logged — checked with 3.9 MB requests). Default the stand to `log,warn,error`.
 7. **The signer config is laxer than the Диадок config.**
    - `CRYPTOARM_SERVER_URL` accepts `http://` to any host (`src/signer/server-cms-signer.ts:197`), so `X-API-Key` and the document can travel in cleartext.
    - `changeme` is not rejected (`src/signer/config.ts:17-33`).

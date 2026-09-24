@@ -85,6 +85,17 @@ fi
 # 2. API key handling.
 start_mock ok secret-key
 expect_success "sends X-API-Key when CRYPTOARM_SERVER_API_KEY is set" CRYPTOARM_SERVER_API_KEY=secret-key
+# A curl wrapper that records its argv: the key must travel in a header file, not on the command line.
+real_curl="$(command -v curl)"
+mkdir -p "$work/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexec "%s" "$@"\n' "$work/curl-argv" "$real_curl" >"$work/bin/curl"
+chmod +x "$work/bin/curl"
+expect_success "sends the API key through a curl wrapper" CRYPTOARM_SERVER_API_KEY=secret-key PATH="$work/bin:$PATH"
+if [ -s "$work/curl-argv" ] && ! grep -q "secret-key" "$work/curl-argv"; then
+  pass "the API key is not in curl's argv (ps)"
+else
+  fail "the API key is in curl's argv: $(cat "$work/curl-argv" 2>/dev/null)"
+fi
 expect_failure "fails when the server rejects the API key" "HTTP 401" CRYPTOARM_SERVER_API_KEY=wrong
 
 # 3. Failure modes.

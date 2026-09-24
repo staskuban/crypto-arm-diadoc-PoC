@@ -7,13 +7,15 @@ include:
 services:
   # One-shot CLI, not a daemon: the profile keeps it out of `docker compose up`.
   #   docker compose build app
-  #   docker compose run --rm app send <ИдФайл>.xml     # file from ${UTD_DIR:-./utd}
-  # (`run` reuses an existing image: after changes in src pass `--build`.)
+  #   docker compose run --rm --no-deps app send <ИдФайл>.xml     # file from ${UTD_DIR:-./utd}
+  # (`run` reuses an existing image: after changes in src run `build app` or pass `--build`, which
+  # builds only the app: cryptoarm-server has no build section and `pull_policy: never`, D8.)
+  # APP_IMAGE overrides the tag, e.g. for a throwaway stand next to the shared one.
   app:
     profiles: [app]
     build:
       context: .
-    image: kryptoarm-diadoc/app:local
+    image: ${APP_IMAGE:-kryptoarm-diadoc/app:local}
     init: true
     depends_on:
       cryptoarm-server:
