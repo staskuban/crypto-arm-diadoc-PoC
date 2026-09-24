@@ -4,7 +4,7 @@ export type PipelineStep =
 export type PipelineErrorCode =
   /** УПД rejected by parseUtd (see `cause`: UtdError). Fix the document. */
   | 'INVALID_UTD'
-  /** Above the single-request ShelfUpload limit; chunked upload is not implemented. */
+  /** Above the documented shelf maximum (400 MB, SHELF_MAX_BYTES); checked before parsing. */
   | 'CONTENT_TOO_LARGE'
   | 'SIGN_FAILED'
   /** The verify call itself failed (network, HTTP). */

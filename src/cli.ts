@@ -2,6 +2,7 @@
 // Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server and posts it to Diadoc.
 // Settings come from env (see .env.example); `npm run cli -- send <file.xml>` loads ./.env.
 import { readFile as fsReadFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -13,6 +14,7 @@ import {
   writeRefreshTokenFile,
 } from './diadoc/index.js';
 import {
+  isResendSalt,
   loadPipelineConfig,
   PipelineError,
   sendUtd,
@@ -49,10 +51,13 @@ export interface CliDeps {
   signal?: AbortSignal;
 }
 
-const USAGE = `Usage: cli send <file.xml> [--no-precheck]
+const USAGE = `Usage: cli send <file.xml> [--no-precheck] [--resend[=<salt>]]
 
 Signs the УПД with КриптоАРМ Server and posts it to Контур.Диадок.
 The file name must be ИдФайл + ".xml"; the bytes are signed and sent unchanged.
+Sending the same file again reuses its operationId (Diadoc treats it as the same send).
+--resend posts it once more on purpose under a new operationId (random salt, printed on stderr);
+--resend=<salt> (1-128 of [A-Za-z0-9._:-]) repeats that resend idempotently.
 Prints the result as JSON. Exit codes: 0 posted, 1 failed, 2 usage, 3 posted but docflow error,
 4 posted but not trackable. Run one process at a time per refresh token.
 `;
@@ -66,13 +71,28 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   const files = rest.filter((a) => !a.startsWith('-'));
   const flags = rest.filter((a) => a.startsWith('-'));
   const [path] = files;
+  const resendFlags = flags.filter((f) => f === '--resend' || f.startsWith('--resend='));
   if (
     command !== 'send' ||
     path === undefined ||
     files.length !== 1 ||
-    flags.some((f) => f !== '--no-precheck')
+    resendFlags.length > 1 ||
+    flags.some((f) => f !== '--no-precheck' && !resendFlags.includes(f))
   ) {
     deps.stderr(USAGE);
+    return EXIT.usage;
+  }
+  const [resendFlag] = resendFlags;
+  const resend =
+    resendFlag === undefined
+      ? undefined
+      : resendFlag === '--resend'
+        ? randomUUID()
+        : resendFlag.slice('--resend='.length);
+  if (resend !== undefined && !isResendSalt(resend)) {
+    deps.stderr(
+      `invalid --resend salt ${JSON.stringify(resend)} (use --resend=<salt>)\n\n${USAGE}`,
+    );
     return EXIT.usage;
   }
 
@@ -86,6 +106,11 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     diadoc = await setupStep('DIADOC_CONFIG', () =>
       (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr),
     );
+    if (resend !== undefined) {
+      deps.stderr(
+        `resend: new operationId with salt ${resend}; to repeat this resend, use --resend=${resend}\n`,
+      );
+    }
     const result = await (deps.send ?? sendUtd)(
       { fileName: basename(path), content },
       {
@@ -100,6 +125,7 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
         toBoxId: config.toBoxId,
         precheck: config.precheck && !flags.includes('--no-precheck'),
         poll: config.poll,
+        ...(resend === undefined ? {} : { resend }),
         ...(deps.signal === undefined ? {} : { signal: deps.signal }),
       },
     );
@@ -177,7 +203,8 @@ export function onRefreshTokenRotated(
 }
 
 /**
- * The first signal aborts between steps (a running Diadoc request and its retries finish first);
+ * The first signal aborts between steps (a running PostMessage/CanPostMessage and its retries finish
+ * first; a shelf upload stops at once, leaving a harmless unused shelf file);
  * the handler is registered with `once`, so a second signal kills the process.
  */
 export function interruptHandler(

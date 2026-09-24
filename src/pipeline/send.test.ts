@@ -8,6 +8,7 @@ import {
   DiadocError,
   DiadocOperationPendingError,
   DiadocPostOutcomeUnknownError,
+  SHELF_MAX_BYTES,
   SHELF_UPLOAD_MAX_BYTES,
   type DocflowStatus,
   type Document,
@@ -29,12 +30,13 @@ import {
 import { parseCmsSignedData } from '../asn1/index.js';
 import { UtdError } from '../utd/index.js';
 import { PipelineError } from './errors.js';
-import { operationIdFor } from './operation-id.js';
+import { operationIdFor, type OperationKey } from './operation-id.js';
 import { sendUtd, type PipelineDiadoc, type SendUtdInput, type SendUtdOptions } from './send.js';
 
 const FIXTURES = new URL('../utd/fixtures/', import.meta.url);
 const FILE_NAME = readdirSync(FIXTURES).find((f) => f.endsWith('.xml')) ?? '';
 const CONTENT = readFileSync(new URL(FILE_NAME, FIXTURES));
+const ID_FILE = FILE_NAME.slice(0, -'.xml'.length);
 
 // A real detached CMS (КриптоАРМ Server, CN=cryptoarm.server.test) and its signer certificate. The
 // fake verifier decides validity; the pipeline checks the structure and the signer.
@@ -54,6 +56,9 @@ const NOW = Date.parse('2026-10-01T00:00:00Z');
 
 const FROM = 'from-box';
 const TO = 'to-box';
+
+const opId = (key: Partial<OperationKey> = {}): string =>
+  operationIdFor({ fromBoxId: FROM, toBoxId: TO, idFile: ID_FILE, content: CONTENT, ...key });
 
 /** Pads the УПД with whitespace before the closing root tag: still the same valid document. */
 function padded(size: number): Buffer {
@@ -110,6 +115,7 @@ class FakeDiadoc implements PipelineDiadoc {
   refs: DocumentRef[] = [];
   getOptions: (RequestOptions | undefined)[] = [];
   onGetDocument: (() => Promise<Document>) | undefined;
+  onShelfUpload: (() => Promise<string>) | undefined;
 
   canPostResult: MessageValidationResult | Error = { Errors: [] };
   shelfResult: string | Error = 'dd-api-shelf';
@@ -126,6 +132,7 @@ class FakeDiadoc implements PipelineDiadoc {
   shelfUpload(content: Buffer, options?: ShelfUploadOptions): Promise<string> {
     this.calls.push('shelfUpload');
     this.uploads.push({ content, options });
+    if (this.onShelfUpload) return this.onShelfUpload();
     return settle(this.shelfResult);
   }
 
@@ -212,7 +219,7 @@ describe('sendUtd happy path', () => {
     });
 
     const post = diadoc.posts[0];
-    expect(post?.options.operationId).toBe(operationIdFor(FROM, TO, FILE_NAME, CONTENT));
+    expect(post?.options.operationId).toBe(opId());
     expect(post?.message).toEqual({
       FromBoxId: FROM,
       ToBoxId: TO,
@@ -275,18 +282,67 @@ describe('sendUtd happy path', () => {
   });
 });
 
+describe('sendUtd shelf upload', () => {
+  it('sends content above the single-request limit through the shelf as well', async () => {
+    const { diadoc, run } = setup();
+    const big = padded(SHELF_UPLOAD_MAX_BYTES + 1);
+    const result = await run({ fileName: FILE_NAME, content: big });
+    expect(diadoc.calls).toEqual(['canPostMessage', 'shelfUpload', 'postMessage', 'getDocument']);
+    expect(diadoc.uploads[0]?.content.equals(big)).toBe(true);
+    expect(result).toMatchObject({ contentPlacement: 'shelf', nameOnShelf: 'dd-api-shelf' });
+  });
+
+  it('passes the abort signal to the upload and rethrows its reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted');
+    const { diadoc, run } = setup({ signal: controller.signal });
+    diadoc.onShelfUpload = () => {
+      controller.abort(reason);
+      return Promise.reject(new DOMException('This operation was aborted', 'AbortError'));
+    };
+    await expect(run({ fileName: FILE_NAME, content: padded(600_000) })).rejects.toBe(reason);
+    expect(diadoc.uploads[0]?.options?.signal).toBe(controller.signal);
+    expect(diadoc.calls).not.toContain('postMessage');
+  });
+});
+
 describe('sendUtd operationId', () => {
-  it('is deterministic and depends on boxes, file name and content', () => {
-    const id = operationIdFor(FROM, TO, FILE_NAME, CONTENT);
-    expect(id).toMatch(/^[0-9a-f]{64}$/);
-    expect(operationIdFor(FROM, TO, FILE_NAME, Buffer.from(CONTENT))).toBe(id);
-    expect(operationIdFor(TO, FROM, FILE_NAME, CONTENT)).not.toBe(id);
-    expect(operationIdFor(FROM, TO, `x${FILE_NAME}`, CONTENT)).not.toBe(id);
-    expect(operationIdFor(FROM, TO, FILE_NAME, padded(CONTENT.length + 1))).not.toBe(id);
-    // Field boundaries are unambiguous.
-    expect(operationIdFor('ab', 'c', 'f', CONTENT)).not.toBe(
-      operationIdFor('a', 'bc', 'f', CONTENT),
-    );
+  it('hashes ИдФайл, not the file name: the extension case does not make a second send', async () => {
+    const lower = setup();
+    const upper = setup();
+    await lower.run();
+    await upper.run({ fileName: `${ID_FILE}.XML`, content: CONTENT });
+    expect(upper.diadoc.posts[0]?.options.operationId).toBe(opId());
+    expect(lower.diadoc.posts[0]?.options.operationId).toBe(opId());
+  });
+
+  it('includes customDocumentId', async () => {
+    const { diadoc, run } = setup({ customDocumentId: 'inv-42' });
+    const result = await run();
+    expect(diadoc.posts[0]?.options.operationId).toBe(opId({ customDocumentId: 'inv-42' }));
+    expect(result.operationId).not.toBe(opId());
+  });
+
+  it('resend adds the salt: a new operationId, repeated for the same salt, reported back', async () => {
+    const first = setup({ resend: 'retry-1' });
+    const again = setup({ resend: 'retry-1' });
+    const result = await first.run();
+    await again.run();
+    expect(first.diadoc.posts[0]?.options.operationId).toBe(opId({ resend: 'retry-1' }));
+    expect(again.diadoc.posts[0]?.options.operationId).toBe(opId({ resend: 'retry-1' }));
+    expect(result.operationId).not.toBe(opId());
+    expect(result.resend).toBe('retry-1');
+  });
+
+  it('without resend the result has no resend field', async () => {
+    const { run } = setup();
+    expect(await run()).not.toHaveProperty('resend');
+  });
+
+  it('rejects an invalid resend salt before anything else', async () => {
+    const { signer, run } = setup({ resend: 'a b' });
+    await expect(run()).rejects.toThrow(/resend/);
+    expect(signer.signed).toHaveLength(0);
   });
 
   it('is the same on a retry of the same document, although the signature changes', async () => {
@@ -314,13 +370,13 @@ describe('sendUtd failures before sending', () => {
     expect(diadoc.calls).toHaveLength(0);
   });
 
-  it('rejects content above the shelf upload limit before signing', async () => {
+  it('rejects content above the documented shelf maximum before parsing', async () => {
     const { signer, run } = setup();
     const error = await failure(
-      run({ fileName: FILE_NAME, content: padded(SHELF_UPLOAD_MAX_BYTES + 1) }),
+      run({ fileName: FILE_NAME, content: Buffer.alloc(SHELF_MAX_BYTES + 1) }),
     );
     expect(error).toMatchObject({ code: 'CONTENT_TOO_LARGE', step: 'parse' });
-    expect(error.message).toMatch(/not supported yet/);
+    expect(error.message).toMatch(/400000000/);
     expect(signer.signed).toHaveLength(0);
   });
 
@@ -482,7 +538,7 @@ describe('sendUtd PostMessage failures', () => {
     diadoc.postResult = new DiadocConflictError('POST', '/V3/PostMessage', body);
     const error = await failure(run());
     expect(error).toMatchObject({ code, step: 'post' });
-    expect(error.operationId).toBe(operationIdFor(FROM, TO, FILE_NAME, CONTENT));
+    expect(error.operationId).toBe(opId());
     expect(error.message).toContain(body);
     expect(diadoc.calls).not.toContain('getDocument');
   });
@@ -497,7 +553,7 @@ describe('sendUtd PostMessage failures', () => {
 
   it('says an ambiguous PostMessage failure may have been posted', async () => {
     const { diadoc, run } = setup();
-    const operationId = operationIdFor(FROM, TO, FILE_NAME, CONTENT);
+    const operationId = opId();
     diadoc.postResult = new DiadocPostOutcomeUnknownError(
       operationId,
       new DiadocError('POST', '/V3/PostMessage', 502, 'bad gateway'),
@@ -524,6 +580,19 @@ describe('sendUtd PostMessage failures', () => {
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'POST_PENDING', step: 'post' });
     expect(error.message).toMatch(/run send again/);
+  });
+
+  it('tells a pending or ambiguous resend to repeat with the same salt', async () => {
+    const pending = setup({ resend: 'r-7' });
+    pending.diadoc.postResult = new DiadocOperationPendingError('op', 10);
+    expect((await failure(pending.run())).message).toMatch(/same resend salt r-7/);
+
+    const unknown = setup({ resend: 'r-7' });
+    unknown.diadoc.postResult = new DiadocPostOutcomeUnknownError(
+      'op',
+      new DiadocError('POST', '/V3/PostMessage', 502, 'bad gateway'),
+    );
+    expect((await failure(unknown.run())).message).toMatch(/same resend salt r-7/);
   });
 
   it('fails with the messageId when the message has no document entity', async () => {

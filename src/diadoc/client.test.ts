@@ -9,7 +9,9 @@ import {
   DiadocClient,
   type DiadocClientOptions,
   findDocumentEntity,
+  SHELF_MAX_BYTES,
   SHELF_UPLOAD_MAX_BYTES,
+  SHELF_UPLOAD_MAX_ROUNDS,
 } from './client.js';
 import {
   DiadocConflictError,
@@ -484,11 +486,33 @@ describe('DiadocClient.shelfUpload', () => {
     expect(calls[0]?.url.search).toBe('');
   });
 
-  it('rejects content above the single-request limit without a request', async () => {
+  it('sends content above the single-request limit in parts of that size', async () => {
+    const { client, calls } = makeClient([textResponse('dd-api-big'), jsonResponse([])]);
+    const content = Buffer.alloc(SHELF_UPLOAD_MAX_BYTES + 1, 0x41);
+    content[SHELF_UPLOAD_MAX_BYTES] = 0x42;
+
+    expect(await client.shelfUpload(content, { fileExtension: '.xml' })).toBe('dd-api-big');
+
+    expect(calls.map((c) => c.url.pathname)).toEqual(['/ShelfUploadPartInit', '/ShelfUploadPart']);
+    expect(Buffer.from(calls[0]?.init.body as Uint8Array).length).toBe(SHELF_UPLOAD_MAX_BYTES);
+    expect(Buffer.from(calls[1]?.init.body as Uint8Array)).toEqual(Buffer.from('B'));
+  });
+
+  it('rejects content above the documented shelf maximum without a request', async () => {
     const { client, calls } = makeClient([]);
-    await expect(client.shelfUpload(Buffer.alloc(SHELF_UPLOAD_MAX_BYTES + 1))).rejects.toThrow(
-      /ShelfUploadPart/,
+    await expect(client.shelfUpload(Buffer.alloc(SHELF_MAX_BYTES + 1))).rejects.toThrow(
+      /400000000/,
     );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('passes the abort signal to a single-request upload', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    const { client, calls } = makeClient([textResponse('dd-api-1')]);
+    await expect(
+      client.shelfUpload(Buffer.from('x'), { signal: controller.signal }),
+    ).rejects.toThrow('stop');
     expect(calls).toHaveLength(0);
   });
 
@@ -514,6 +538,175 @@ describe('DiadocClient.shelfUpload', () => {
     expect(await client.shelfUpload(Buffer.from('abc'))).toBe('dd-api-2');
     expect(headerOf(calls[1], 'authorization')).toBe('Bearer NEW');
     expect(Buffer.from(calls[1]?.init.body as Uint8Array).toString()).toBe('abc');
+  });
+});
+
+describe('DiadocClient.shelfUploadParts', () => {
+  const text = (body: string, status = 200, headers: Record<string, string> = {}): Response =>
+    new Response(body, { status, headers: { 'content-type': 'text/plain', ...headers } });
+  const bodyText = (call: Call | undefined): string =>
+    Buffer.from(call?.init.body as Uint8Array).toString();
+  const query = (call: Call | undefined): Record<string, string> =>
+    Object.fromEntries(call?.url.searchParams ?? []);
+  const content = Buffer.from('0123456789');
+
+  it('uploads the first part with ShelfUploadPartInit and the rest with ShelfUploadPart', async () => {
+    const { client, calls } = makeClient([text('dd-api-p'), text('[]'), jsonResponse([])]);
+
+    expect(await client.shelfUploadParts(content, { fileExtension: '.xml', partSize: 4 })).toBe(
+      'dd-api-p',
+    );
+
+    expect(calls.map((c) => [c.init.method, c.url.pathname, query(c), bodyText(c)])).toEqual([
+      ['POST', '/ShelfUploadPartInit', { fileExtension: '.xml', isLastPart: 'false' }, '0123'],
+      [
+        'POST',
+        '/ShelfUploadPart',
+        { fileName: 'dd-api-p', partIndex: '1', isLastPart: 'false' },
+        '4567',
+      ],
+      [
+        'POST',
+        '/ShelfUploadPart',
+        { fileName: 'dd-api-p', partIndex: '2', isLastPart: 'true' },
+        '89',
+      ],
+    ]);
+    for (const call of calls) {
+      expect(headerOf(call, 'content-type')).toBe('application/octet-stream');
+      expect(call.init.redirect).toBe('error');
+    }
+  });
+
+  it('marks a single part as the last one and accepts the name as a JSON string', async () => {
+    const { client, calls } = makeClient([jsonResponse('dd-api-1')]);
+    expect(await client.shelfUploadParts(Buffer.from('abc'), { partSize: 4 })).toBe('dd-api-1');
+    expect(calls.map((c) => [c.url.pathname, query(c)])).toEqual([
+      ['/ShelfUploadPartInit', { isLastPart: 'true' }],
+    ]);
+  });
+
+  it('re-sends the parts the last response lists as missing, the last of them with isLastPart', async () => {
+    const { client, calls } = makeClient([
+      text('dd-api-p'),
+      text(''),
+      text('[0, 2]'),
+      text(''),
+      text('[]'),
+    ]);
+
+    expect(await client.shelfUploadParts(content, { partSize: 4 })).toBe('dd-api-p');
+
+    expect(calls.slice(3).map((c) => [query(c), bodyText(c)])).toEqual([
+      [{ fileName: 'dd-api-p', partIndex: '0', isLastPart: 'false' }, '0123'],
+      [{ fileName: 'dd-api-p', partIndex: '2', isLastPart: 'true' }, '89'],
+    ]);
+  });
+
+  it('treats an empty last response as nothing missing, like the official SDK', async () => {
+    const { client } = makeClient([text('dd-api-p'), text(''), text('')]);
+    expect(await client.shelfUploadParts(content, { partSize: 4 })).toBe('dd-api-p');
+  });
+
+  it(`gives up after ${String(SHELF_UPLOAD_MAX_ROUNDS)} rounds with parts still missing`, async () => {
+    const responses = [text('dd-api-p'), text(''), text('[1]')];
+    for (let i = 1; i < SHELF_UPLOAD_MAX_ROUNDS; i++) responses.push(text('[1]'));
+    const { client, calls } = makeClient(responses);
+
+    const error: unknown = await client
+      .shelfUploadParts(content, { partSize: 4 })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DiadocError);
+    expect(error).toMatchObject({ path: '/ShelfUploadPart' });
+    expect((error as Error).message).toMatch(/dd-api-p.*missing.*1/s);
+    expect(calls).toHaveLength(2 + SHELF_UPLOAD_MAX_ROUNDS);
+  });
+
+  it.each(['[3]', '[-1]', '[1.5]', '{"a":1}', 'oops', '["1"]'])(
+    'rejects a malformed missing-parts answer %s',
+    async (answer) => {
+      const { client } = makeClient([text('dd-api-p'), text(''), text(answer)]);
+      await expect(client.shelfUploadParts(content, { partSize: 4 })).rejects.toBeInstanceOf(
+        DiadocError,
+      );
+    },
+  );
+
+  it('repeats a part with the same bytes and query after a transient failure', async () => {
+    const { client, calls, slept } = makeClient([
+      text('dd-api-p'),
+      text('busy', 503, { 'retry-after': '1' }),
+      text(''),
+      text('[]'),
+    ]);
+    expect(await client.shelfUploadParts(content, { partSize: 4 })).toBe('dd-api-p');
+    expect(slept).toEqual([1000]);
+    expect([calls[1], calls[2]].map((c) => [query(c), bodyText(c)])).toEqual([
+      [{ fileName: 'dd-api-p', partIndex: '1', isLastPart: 'false' }, '4567'],
+      [{ fileName: 'dd-api-p', partIndex: '1', isLastPart: 'false' }, '4567'],
+    ]);
+  });
+
+  it('resends the same part with a fresh token after a 401 mid-upload', async () => {
+    const auth = new FakeAuth('OLD', 'NEW');
+    const { client, calls } = makeClient([text('dd-api-p'), text('', 401), text(''), text('[]')], {
+      auth,
+    });
+    expect(await client.shelfUploadParts(content, { partSize: 4 })).toBe('dd-api-p');
+    expect(
+      [calls[1], calls[2]].map((c) => [headerOf(c, 'authorization'), query(c), bodyText(c)]),
+    ).toEqual([
+      ['Bearer OLD', { fileName: 'dd-api-p', partIndex: '1', isLastPart: 'false' }, '4567'],
+      ['Bearer NEW', { fileName: 'dd-api-p', partIndex: '1', isLastPart: 'false' }, '4567'],
+    ]);
+  });
+
+  it('stops at a non-transient error of a part', async () => {
+    const { client, calls } = makeClient([text('dd-api-p'), text('bad part', 400)]);
+    await expect(client.shelfUploadParts(content, { partSize: 4 })).rejects.toMatchObject({
+      status: 400,
+      path: '/ShelfUploadPart',
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('rejects a bad name from ShelfUploadPartInit', async () => {
+    const { client, calls } = makeClient([text('two words')]);
+    await expect(client.shelfUploadParts(content, { partSize: 4 })).rejects.toMatchObject({
+      path: '/ShelfUploadPartInit',
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('stops between parts when the signal is aborted', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stop');
+    const { client, calls } = makeClient([], {
+      fetch: () => {
+        controller.abort(reason);
+        return Promise.resolve(text('dd-api-p'));
+      },
+    });
+    await expect(
+      client.shelfUploadParts(content, { partSize: 4, signal: controller.signal }),
+    ).rejects.toBe(reason);
+    expect(calls).toHaveLength(0); // the custom fetch above does not record
+  });
+
+  it.each([0, -1, 1.5, SHELF_UPLOAD_MAX_BYTES + 1])('rejects partSize %s', async (partSize) => {
+    const { client, calls } = makeClient([]);
+    await expect(client.shelfUploadParts(content, { partSize })).rejects.toThrow(/partSize/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects empty content and content above the shelf maximum', async () => {
+    const { client, calls } = makeClient([]);
+    await expect(client.shelfUploadParts(Buffer.alloc(0))).rejects.toThrow(/empty/);
+    await expect(client.shelfUploadParts(Buffer.alloc(SHELF_MAX_BYTES + 1))).rejects.toThrow(
+      /400000000/,
+    );
+    expect(calls).toHaveLength(0);
   });
 });
 

@@ -6,7 +6,7 @@ import {
   DiadocOperationPendingError,
   DiadocPostOutcomeUnknownError,
   findDocumentEntity,
-  SHELF_UPLOAD_MAX_BYTES,
+  SHELF_MAX_BYTES,
   type DiadocClient,
   type DocflowStatus,
   type MessageValidationError,
@@ -25,7 +25,7 @@ import {
 import { toDocumentAttachment, toMessagePrototype } from './attachment.js';
 import { classifyConflict } from './conflict.js';
 import { PipelineError, type PipelineErrorCode, type PipelineStep } from './errors.js';
-import { operationIdFor } from './operation-id.js';
+import { isResendSalt, operationIdFor } from './operation-id.js';
 import {
   classifyVerifyFailure,
   cmsPolicyViolations,
@@ -70,11 +70,20 @@ export interface SendUtdOptions {
   poll?: Partial<PollOptions>;
   /** PostMessage attempts while Diadoc answers 204. Default: the client's. */
   postMaxAttempts?: number;
+  /** Sent as the attachment's CustomDocumentId; part of the operationId. */
   customDocumentId?: string;
+  /**
+   * Deliberate resend of a УПД that was already posted (e.g. after the recipient rejected it): the
+   * salt goes into the operationId, so Diadoc sees a new operation. Reuse the same salt to retry that
+   * resend idempotently. Without it a repeated send reuses the operationId (see `sendUtd`). Must pass
+   * `isResendSalt`.
+   */
+  resend?: string;
   resolveVersion?: ParseUtdOptions['resolveVersion'];
   /**
-   * Checked between steps and passed to the signer and to GetDocument. CanPostMessage, ShelfUpload and
-   * PostMessage are not interrupted (PostMessage may wait through its bounded retries). Before
+   * Checked between steps and passed to the signer, the shelf upload (between parts too) and
+   * GetDocument. CanPostMessage and PostMessage are not interrupted (PostMessage may wait through its
+   * bounded retries). Before
    * PostMessage an abort rejects with the signal's reason; after it, polling stops and the result is
    * returned.
    */
@@ -83,6 +92,8 @@ export interface SendUtdOptions {
 
 export interface SendUtdResult {
   operationId: string;
+  /** The resend salt, when this was a deliberate resend. */
+  resend?: string;
   fileName: string;
   fromBoxId: string;
   toBoxId: string;
@@ -104,9 +115,10 @@ export interface SendUtdResult {
 }
 
 /**
- * Signs a УПД and posts it to Diadoc. The operationId is derived from boxes + file name + content, so a
- * repeated call sends the same operationId. Unverified (D7): that Diadoc answers a repeat whose body
- * differs (new signature, new NameOnShelf) with the original message rather than a 409.
+ * Signs a УПД and posts it to Diadoc. The operationId is derived from boxes + ИдФайл + content +
+ * customDocumentId (+ the resend salt), so a repeated call sends the same operationId. Unverified
+ * (D7): that Diadoc answers a repeat whose body differs (new signature, new NameOnShelf) with the
+ * original message rather than a 409. `resend` makes a new operationId on purpose.
  */
 export async function sendUtd(
   input: SendUtdInput,
@@ -116,27 +128,43 @@ export async function sendUtd(
   const { fromBoxId, toBoxId, signal } = options;
   if (fromBoxId === '' || toBoxId === '') throw new Error('fromBoxId and toBoxId must be set');
   if (fromBoxId === toBoxId) throw new Error('fromBoxId and toBoxId must differ');
+  const { resend } = options;
+  if (resend !== undefined && !isResendSalt(resend)) {
+    throw new Error(
+      `resend salt ${JSON.stringify(resend)} is invalid: use 1-128 of [A-Za-z0-9._:-]`,
+    );
+  }
   const log = deps.log ?? (() => undefined);
   const callOptions = signal === undefined ? {} : { signal };
   signal?.throwIfAborted();
-  // parseUtd keeps the same bytes and requires the same file name, so this is the parsed document's id.
-  const operationId = operationIdFor(fromBoxId, toBoxId, input.fileName, input.content);
 
-  // 1. Parse: the exact bytes, no re-encoding.
-  const utd = step('parse', 'INVALID_UTD', () =>
-    parseUtd(
-      input,
-      options.resolveVersion === undefined ? {} : { resolveVersion: options.resolveVersion },
-    ),
-  );
-  if (utd.content.length > SHELF_UPLOAD_MAX_BYTES) {
+  // 1. Parse: the exact bytes, no re-encoding. Size first: a file the shelf cannot take is not parsed.
+  if (input.content.length > SHELF_MAX_BYTES) {
     throw new PipelineError(
       'CONTENT_TOO_LARGE',
       'parse',
-      `${utd.fileName} is ${String(utd.content.length)} bytes; above ${String(SHELF_UPLOAD_MAX_BYTES)} ` +
-        'needs chunked ShelfUploadPart, not supported yet',
+      `${input.fileName} is ${String(input.content.length)} bytes; the Diadoc shelf takes at most ` +
+        String(SHELF_MAX_BYTES),
     );
   }
+  let utd: UtdDocument;
+  try {
+    utd = parseUtd(
+      input,
+      options.resolveVersion === undefined ? {} : { resolveVersion: options.resolveVersion },
+    );
+  } catch (error) {
+    // Before the operationId exists (it hashes ИдФайл), so not through `step`.
+    throw new PipelineError('INVALID_UTD', 'parse', describe(error), { cause: error });
+  }
+  const operationId = operationIdFor({
+    fromBoxId,
+    toBoxId,
+    idFile: utd.idFile,
+    content: utd.content,
+    customDocumentId: options.customDocumentId,
+    resend,
+  });
   log(
     `parsed ${utd.fileName}: ${utd.function} ${utd.version}, ${String(utd.content.length)} bytes`,
   );
@@ -222,9 +250,17 @@ export async function sendUtd(
   let nameOnShelf: string | undefined;
   if (attachment.contentPlacement === 'shelf') {
     signal?.throwIfAborted();
-    nameOnShelf = await stepAsync('upload', 'SHELF_UPLOAD_FAILED', () =>
-      deps.diadoc.shelfUpload(attachment.content, { fileExtension: '.xml' }),
-    );
+    nameOnShelf = await stepAsync('upload', 'SHELF_UPLOAD_FAILED', async () => {
+      try {
+        return await deps.diadoc.shelfUpload(attachment.content, {
+          fileExtension: '.xml',
+          ...callOptions,
+        });
+      } catch (error) {
+        // An aborted fetch or retry pause rejects with its own AbortError, not the signal's reason.
+        throw signal?.aborted ? signal.reason : error;
+      }
+    });
     log(`uploaded to shelf as ${nameOnShelf}`);
   }
   const documentAttachment = toDocumentAttachment(attachment, nameOnShelf);
@@ -241,7 +277,7 @@ export async function sendUtd(
       },
     );
   } catch (error) {
-    throw postError(error, operationId);
+    throw postError(error, operationId, resend);
   }
   const entity = findDocumentEntity(message);
   if (!entity?.EntityId) {
@@ -271,6 +307,7 @@ export async function sendUtd(
 
   return {
     operationId,
+    ...(resend === undefined ? {} : { resend }),
     fileName: utd.fileName,
     fromBoxId,
     toBoxId,
@@ -325,12 +362,14 @@ function buildAttachment(
   );
 }
 
-function postError(error: unknown, operationId: string): unknown {
+function postError(error: unknown, operationId: string, resend: string | undefined): unknown {
+  // Only the same salt reproduces the operationId of a resend.
+  const sameSalt = resend === undefined ? '' : ` with the same resend salt ${resend}`;
   if (error instanceof DiadocOperationPendingError) {
     return new PipelineError(
       'POST_PENDING',
       'post',
-      `${error.message}; run send again later to get the result`,
+      `${error.message}; run send again${sameSalt} later to get the result`,
       { cause: error, operationId },
     );
   }
@@ -339,7 +378,7 @@ function postError(error: unknown, operationId: string): unknown {
       'POST_FAILED',
       'post',
       `${describe(error.cause)}; the message may have been posted: look it up in Diadoc before ` +
-        'sending again (a repeat reuses the operationId, D7)',
+        `sending again${sameSalt} (a repeat reuses the operationId, D7)`,
       { cause: error, operationId },
     );
   }
