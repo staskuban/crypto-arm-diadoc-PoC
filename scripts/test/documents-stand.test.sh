@@ -57,6 +57,26 @@ run_secrets "$work/s4" SIGN_SERVICE_API_KEYS_FILE="$work/nope" SIGN_SERVICE_API_
   [ ! -e "$work/s4/sign_service_api_key" ] && [ -s "$work/s4/admin_password" ] &&
   pass "SIGN_SERVICE_API_KEY_OPTIONAL=1 skips the API key" || fail "SIGN_SERVICE_API_KEY_OPTIONAL=1"
 
+# The API key is picked as the server's start.sh reads the list: split on newlines and commas,
+# trimmed, empty ones dropped (R2 minor 21).
+printf '\r\n  , ,key-one ,key-two\n' >"$work/api_keys2"
+run_secrets "$work/s5" SIGN_SERVICE_API_KEYS_FILE="$work/api_keys2" &&
+  [ "$(cat "$work/s5/sign_service_api_key")" = key-one ] && pass "skips empty comma fields before the first key" ||
+  fail "api key after empty fields: $(cat "$work/s5/sign_service_api_key" 2>/dev/null)"
+printf 'key one\n' >"$work/api_keys3"
+run_secrets "$work/s6" SIGN_SERVICE_API_KEYS_FILE="$work/api_keys3" && fail "a key with inner whitespace accepted" ||
+  { grep -q "contains whitespace" "$work/out" && [ ! -e "$work/s6/sign_service_api_key" ] &&
+    ! grep -q "key one" "$work/out" && pass "refuses a key with inner whitespace (as start.sh does)" ||
+    fail "wrong result for a key with inner whitespace"; }
+
+# A failing write leaves no temp file with a secret in the secrets dir.
+mkdir -p "$work/failbin"
+printf '#!/bin/sh\nexit 1\n' >"$work/failbin/mv"
+chmod +x "$work/failbin/mv"
+run_secrets "$work/s7" PATH="$work/failbin:$PATH" && fail "a failing mv is ignored" ||
+  { [ -z "$(ls -A "$work/s7")" ] && pass "removes the temp file when a write fails" ||
+    fail "temp file left behind: $(ls -A "$work/s7")"; }
+
 # start.sh: secrets -> env of the command, DB_URI built, required files enforced.
 cat >"$work/dump-env" <<'EOF'
 #!/bin/sh

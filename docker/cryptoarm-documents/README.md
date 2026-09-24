@@ -42,7 +42,8 @@ Secrets are files in `./secrets`, mounted read-only at `/run/secrets`. `start.sh
 - **Server API key is required.** Pass the `api_keys` of the worktree that runs the server (`SIGN_SERVICE_API_KEYS_FILE`); without it the script stops (`SIGN_SERVICE_API_KEY_OPTIONAL=1` only for `AUTH_MODE=none`), otherwise `cloud-sign` would fail with 401 at run time.
 - **Linux hosts (unverified).** Secrets are 0600 files of the host user; checked on Docker Desktop only (it shows a bind-mounted file as owned by whichever uid reads it). On Linux, postgres reads `POSTGRES_PASSWORD_FILE` as uid 999, `ca-stub` reads the `.cer` files as uid 101 (F17), and the API runs with `cap_drop: [ALL]` (no `DAC_OVERRIDE`), so the files need matching ownership/permissions (same caveat as the server stand, I5).
 - `ca-stub` mounts the whole `SIGNER_CERTS_DIR` (the server's `certs/` includes `user/` for PIN-less PFX) but serves only the mapped `.cer` files; point `SIGNER_CERTS_DIR` at a directory with only the `.cer` files if `certs/user` holds real keys.
-- `smoke-documents.sh` with `DOCUMENTS_SIGNER_EMAIL` resets that user's password on every run (`PUT /api/v1/users/{id} {password}` keeps login and e-mail — verified): test stands only.
+- `smoke-documents.sh` with `DOCUMENTS_SIGNER_EMAIL` resets that user's password on every run (`PUT /api/v1/users/{id} {password}` keeps login and e-mail — verified): test stands only. It refuses the admin's own e-mail (the found user's id equals the `userId` of the admin login; F16, checked against the shared stand with `server-test@documents.local`), since the new password is never saved.
+- `documents-secrets.sh` picks the first server API key as `start.sh` reads the list (split on newlines and commas, trimmed, empty ones skipped, a key with inner whitespace refused) and removes its temp file when a write fails or it is interrupted.
 
 ## Container hardening
 

@@ -39,7 +39,10 @@ esac
 [ "$2" = "-i" ] && cat >/dev/null # consume stdin (certificate bytes)
 case "$*" in
   *"command -v expect"*) exit "${FAKE_NO_EXPECT:-0}" ;;
-  *"-enum_cont"*) printf '%s\n' '\\.\HDIMAGE\other' ${FAKE_EXISTING:+"$FAKE_EXISTING"} ;;
+  *" mkdir /tmp/"*".lock") exit "${FAKE_LOCKED:-0}" ;;
+  *"-enum_cont"*)
+    printf '%s\n' '\\.\HDIMAGE\other' ${FAKE_EXISTING:+"$FAKE_EXISTING"}
+    exit "${FAKE_ENUM_EXIT:-0}" ;;
   *" cat /tmp/"*) cat "$FAKE_CSR" ;;
   *"-store mroot"*) exit "${FAKE_MROOT_EXIT:-0}" ;;
   *"-store uMy"*) exit "${FAKE_UMY_EXIT:-0}" ;;
@@ -114,13 +117,17 @@ stop_mock() {
   fi
 }
 
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+# Allowlist of trusted test-CA roots: the fake CA (and a comment / blank line, as in the real file).
+printf '# test roots\n\n%s  cryptopro-test-ca-2012-21.cer\n' "$(sha256 "$work/ca.der")" >"$work/roots.sha256"
+
 run_issue() { # extra env assignments...
   rm -rf "$work/certs" && mkdir -p "$work/certs"
   : >"$work/docker.log"
   rm -f "$work/cryptcp.log"
   env PATH="$work/bin:$PATH" FAKE_DOCKER_LOG="$work/docker.log" FAKE_CSR="$work/request.pem" \
     FAKE_CRYPTCP="$work/bin/cryptcp" FAKE_CRYPTCP_LOG="$work/cryptcp.log" KEYGEN_TIMEOUT=20 \
-    TEST_CA_URL="http://127.0.0.1:$port/certsrv" CERTS_DIR="$work/certs" KEY_CONTAINER=i3-test-cont "$@" \
+    TEST_CA_URL="http://127.0.0.1:$port/certsrv" CERTS_DIR="$work/certs" KEY_CONTAINER=i3-test-cont TEST_CA_ROOTS_FILE="$work/roots.sha256" "$@" \
     "$issue" >"$work/out" 2>&1
 }
 
@@ -161,6 +168,8 @@ check "binds the certificate to the key container in uMy" \
   logged '-store uMy -file /tmp/i3-test-cont.cer -cont \\.\HDIMAGE\i3-test-cont'
 check "binds the signature key (the request is made with -sg)" logged "-cont \\\\.\\HDIMAGE\\i3-test-cont -at_signature"
 check "keeps the key container on success" not logged "-deletekeyset"
+check "takes a name lock in the container before the listing" logged "mkdir /tmp/i3-test-cont.lock"
+check "releases the name lock on success" logged "rmdir /tmp/i3-test-cont.lock"
 check "removes temp files in the container" logged "rm -f /tmp/i3-test-cont.req"
 check "reports ИНН ЮЛ honoured" out_has '1\.2\.643\.100\.4 \(ИНН ЮЛ\) = 2311386400: honoured$'
 check "reports ОГРН honoured" out_has '1\.2\.643\.100\.1 \(ОГРН\) = 1252300058977: honoured$'
@@ -190,6 +199,20 @@ start_mock ok "$work/leaf-full.der" "$work/leaf-full.der"
 if run_issue; then fail "rejects a non-self-signed AIA issuer"; else pass "rejects a non-self-signed AIA issuer"; fi
 check "explains the non-root issuer" out_has 'not self-signed'
 check "does not trust the non-root issuer" not logged "-store mroot"
+
+# --- AIA root is not in the allowlist (fetched over plain http) ------------------
+start_mock ok "$work/leaf-full.der"
+printf '%s  other.cer\n' "$(sha256 "$work/other-ca.der")" >"$work/other-roots.sha256"
+if run_issue TEST_CA_ROOTS_FILE="$work/other-roots.sha256"; then fail "rejects an AIA root that is not in the allowlist"; else pass "rejects an AIA root that is not in the allowlist"; fi
+check "explains the unknown root and names its SHA-256" out_has "SHA-256 $(sha256 "$work/ca.der") is not in"
+check "does not trust the unknown root" not logged "-store mroot"
+check "deletes its own key container after an unknown root" logged '-deletekeyset -cont \\.\HDIMAGE\i3-test-cont'
+if run_issue TEST_CA_ROOTS_FILE="$work/nope"; then fail "fails without the allowlist file"; else pass "fails without the allowlist file"; fi
+check "does not trust a root without the allowlist" not logged "-store mroot"
+check "the default allowlist pins the renewal-21 root of fetch-test-certs.sh" \
+  grep -qxF '6664740262766f0428379bb6ff2340c2d8497ce1862cd4e04f6353c2e978fb03  cryptopro-test-ca-2012-21.cer' \
+  "$here/../test-ca-roots.sha256"
+check "fetch-test-certs.sh takes the root's hash from the same allowlist" grep -qF 'test-ca-roots.sha256' "$here/../fetch-test-certs.sh"
 
 # --- mroot / uMy install fails ---------------------------------------------
 start_mock ok "$work/leaf-full.der"
@@ -222,6 +245,19 @@ refuses() { # name, env...
 }
 refuses "refuses an existing key container" FAKE_EXISTING='\\.\HDIMAGE\i3-test-cont'
 check "explains the existing key container" out_has 'already exists'
+# M3 (R2): a failing enumeration must not look like "no such container": the cleanup would then
+# delete an existing, non-exportable key after a failed keygen.
+refuses "refuses when the key containers cannot be listed" FAKE_ENUM_EXIT=1
+check "explains the failed enumeration" out_has 'cannot list the key containers'
+refuses "never deletes an existing key when the enumeration fails" \
+  FAKE_ENUM_EXIT=1 FAKE_EXISTING='\\.\HDIMAGE\i3-test-cont' FAKE_CRYPTCP_EXIT=7
+check "never runs the keygen when the enumeration fails" not logged " expect -f "
+check "releases its name lock when the enumeration fails" logged "rmdir /tmp/i3-test-cont.lock"
+# Two runs with the same KEY_CONTAINER: the second must not reach the keygen (its cleanup would delete
+# the first run's key after cryptcp refuses the existing container).
+refuses "refuses a KEY_CONTAINER another run holds" FAKE_LOCKED=1
+check "explains the held name" out_has 'another issue-test-cert run'
+check "does not release a lock it does not hold" not logged "rmdir /tmp/i3-test-cont.lock"
 refuses "fails when the container is not running" FAKE_RUNNING=false
 refuses "fails when expect is missing in the container" FAKE_NO_EXPECT=1
 refuses "rejects unsafe KEY_CONTAINER" KEY_CONTAINER='bad name;rm'

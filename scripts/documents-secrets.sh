@@ -2,8 +2,10 @@
 # Fills docker/cryptoarm-documents/secrets (git-ignored) for the КриптоАРМ Документы stand:
 #   license_value          copied from DOCUMENTS_LICENSE_FILE (the Документы LICENSE_VALUE key)
 #   sign_service_api_key   first key of SIGN_SERVICE_API_KEYS_FILE (the КриптоАРМ Server api_keys file:
-#                          one key per line or comma-separated). REQUIRED — the shared server stand runs
-#                          from another worktree, so pass that worktree's file; SIGN_SERVICE_API_KEY_OPTIONAL=1
+#                          one key per line or comma-separated; split, trimmed and empty keys skipped
+#                          as the server's start.sh does, a key with inner whitespace refused).
+#                          REQUIRED — the shared server stand runs from another worktree, so pass
+#                          that worktree's file; SIGN_SERVICE_API_KEY_OPTIONAL=1
 #                          skips it for a server with AUTH_MODE=none
 #   admin_password session_secret secret mail_link_token_secret api_key postgres_password
 #                          random (openssl rand -hex 32)
@@ -29,13 +31,18 @@ command -v openssl >/dev/null || die "'openssl' is required"
 [ -d "$secrets_dir" ] || die "secrets dir not found: $secrets_dir"
 umask 077
 
-# put <name> <value>: writes atomically with mode 0600.
+# put <name> <value>: writes atomically with mode 0600. A temp file left by a failure or a signal
+# is removed on exit.
+pending=""
+trap 'if [ -n "$pending" ]; then rm -f "$pending"; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 put() {
-  local tmp
-  tmp="$(mktemp "$secrets_dir/.$1.XXXXXX")"
-  printf '%s' "$2" >"$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$secrets_dir/$1"
+  pending="$(mktemp "$secrets_dir/.$1.XXXXXX")"
+  printf '%s' "$2" >"$pending"
+  chmod 600 "$pending"
+  mv -f "$pending" "$secrets_dir/$1"
+  pending=""
   log "wrote $1"
 }
 
@@ -54,8 +61,10 @@ license="$(tr -d '\r\n' <"$license_file")"
 copied license_value "$license"
 
 if [ -f "$api_keys_file" ]; then
-  api_key="$(tr -d '\r' <"$api_keys_file" | sed -n '/[^[:space:]]/{p;q;}' | cut -d, -f1 | tr -d '[:space:]')"
+  # First key as docker/cryptoarm-server/start.sh reads the list: split on newlines and commas, trimmed.
+  api_key="$(tr ',\r' '\n\n' <"$api_keys_file" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk '!found && /./ { print; found = 1 }')"
   [ -n "$api_key" ] || die "no API key in $api_keys_file"
+  case "$api_key" in *[[:space:]]*) die "the first API key in $api_keys_file contains whitespace (start.sh refuses it)" ;; esac
   copied sign_service_api_key "$api_key"
 elif [ "${SIGN_SERVICE_API_KEY_OPTIONAL:-}" = 1 ]; then
   log "no $api_keys_file: sign_service_api_key not written (SIGN_SERVICE_API_KEY_OPTIONAL=1, AUTH_MODE=none)"

@@ -1,0 +1,6 @@
+# SHA-256 of the DER test-CA roots that may be installed into mroot of a КриптоАРМ Server stand.
+# Used by scripts/fetch-test-certs.sh (download check) and scripts/issue-test-cert.sh (the issuer it
+# fetches over plain http from the certificate's AIA URL must be one of these).
+# Format: <sha256>  <file name in docker/cryptoarm-server/certs/root>. When the CA rolls its key,
+# check the new root out of band (e.g. its thumbprint on https://www.cryptopro.ru) before adding it.
+6664740262766f0428379bb6ff2340c2d8497ce1862cd4e04f6353c2e978fb03  cryptopro-test-ca-2012-21.cer
