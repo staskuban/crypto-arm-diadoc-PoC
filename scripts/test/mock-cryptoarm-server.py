@@ -74,9 +74,10 @@ class Handler(BaseHTTPRequestHandler):
             if MODE == "tampered_http_error" and not ok:
                 return self.reply(400, {"statusCode": 400, "message": "verify failed"})
             is_valid = ok and MODE != "chain_invalid"
+            sign = {"isValidSign": ok, "cadesVfyStatusDescription": None if ok else "mock: chain broken"}
             return self.reply(
                 201,
-                {"status": 200, "message": "", "isValid": is_valid, "isValidSign": ok, "signs": []},
+                {"status": 200, "message": "", "isValid": is_valid, "isValidSign": ok, "signs": [sign]},
             )
 
         self.reply(404, {"statusCode": 404})

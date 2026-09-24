@@ -19,7 +19,7 @@ I2 infra-documents ← I1;  T7 documents-cloud-signer ← I2, T2
 | Id | Task | Depends on | Done when | Human inputs | Status |
 |---|---|---|---|---|---|
 | T0 | Research, DAG, CLAUDE.md fixes | — | this file + `docs/research.md` committed | — | done |
-| I1 | `docker/cryptoarm-server`: Dockerfile from upstream, `cryptopro/` git-ignored, `.env.example`, `certs/` mount + `CERT_PFX_BASE64`, healthcheck, smoke script | T0 | `docker compose up` starts Server; smoke script: `/cms/sign` with test `.cer` → detached CMS, `/cms/verify` valid | CSP `linux-amd64_deb.tgz` (provided), `TRUSTED_LICENSE` (required: server exits without it) | blocked on `TRUSTED_LICENSE`: image builds, CSP trial + test key install OK, server exits `Trusted Crypto license is invalid`; smoke not run against real server |
+| I1 | `docker/cryptoarm-server`: Dockerfile from upstream, `cryptopro/` git-ignored, `.env.example`, `certs/` mount + `CERT_PFX_BASE64`, healthcheck, smoke script | T0 | `docker compose up` starts Server; smoke script: `/cms/sign` with test `.cer` → detached CMS, `/cms/verify` valid | CSP `linux-amd64_deb.tgz`, `TRUSTED_LICENSE` (both provided, local `.env` only) | done: clean `up` → healthy; `SMOKE_STRICT=1 scripts/smoke-server.sh` OK (detached CMS, `isValidSign`/`isValid` true, tampered rejected) |
 | S1 | Diadoc spike: refresh-token auth (staging scope), `GetMyOrganizations`, `GetDocumentTypes`, `PostMessage` УПД with test-CA signature and with `SignWithTestSignature` | T0 | written answer: which signature the test boxes accept; working request samples | integrator `client_id`/`client_secret`/`refresh_token`, two test boxes | todo |
 | T1 | Scaffold: TS, lint, vitest, root `docker-compose.yml` (includes I1 service once merged), `.env.example`, build/test commands in `CLAUDE.md` | T0 | `install`, `build`, `lint`, `test` green on empty suite | — | todo |
 | T2 | `Signer` interface + `ServerCmsSigner` (`/cms/sign`, `detached: true`, `CAdES-BES`, `.cer` only; API key; error mapping) | T1 | unit tests with mocked HTTP green | — | todo |
@@ -31,5 +31,5 @@ I2 infra-documents ← I1;  T7 documents-cloud-signer ← I2, T2
 | T7 | `DocumentsCloudSigner` implementing `Signer` | I2, T2 | unit + integration green | — | blocked |
 
 Risks with dates:
-- Upstream test cert `CN=cryptoarm.server.test` expires **2026-10-28**. Replace it with a PIN-less PFX issued by the КриптоПро test CA before then, or I1/S1/T6 stop working.
+- Upstream test cert `CN=cryptoarm.server.test` and the test CA root expire **2026-10-28**. Replace it with a PIN-less PFX issued by the КриптоПро test CA before then, or I1/S1/T6 stop working.
 - The КриптоПро CSP Demo licence (empty `CRYPTOPRO_LICENSE`) lasts ~90 days from the first start of a fresh `cert_storage/`.

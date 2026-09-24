@@ -56,7 +56,7 @@ Git: default branch is `master` (not `main`). The stash stack is shared across w
 - Keys stay on the server: install PFX at container start (`/certs/user/*.pfx`, or `CERT_PFX_BASE64` + `CERT_PFX_PIN`; roots in `/certs/root`), then pass only the public `.cer` as `cert` — the key is found in `uMy` by thumbprint. Passing a `.pfx` also works but installs it temporarily per request. Test cert/key from CRYPTO-PRO Test Center 2 ship in the upstream repo `certs/`.
 - `.env`: `CRYPTOPRO_LICENSE` may be empty (CSP Demo trial). `TRUSTED_LICENSE` is **required** — without it the server exits `Trusted Crypto license is invalid` (verified 2026-09-24). Keep real licenses only in the untracked `.env`.
 - **Manual prerequisites**: КриптоПро CSP 5.0 `linux-amd64_deb.tgz` downloaded by a human (cryptopro.ru login) into `docker/cryptoarm-server/cryptopro/`, and a `TRUSTED_LICENSE` key. Image is x86_64 only — on Apple Silicon it runs under emulation (build ~30 s once the base image is cached).
-- Test cert `CN=cryptoarm.server.test` expires **2026-10-28**; upstream `crypto.root.test.cer` is byte-identical to it (not the CA root).
+- Test cert `CN=cryptoarm.server.test` and its CA root expire **2026-10-28**. Upstream `crypto.root.test.cer` is byte-identical to the leaf and does not work as a root: `/cms/verify` then returns `isValidSign=false` (chain), so `scripts/fetch-test-certs.sh` installs the real test CA root from the cert's AIA URL instead. `isValidSign` includes the chain; the pure math result is `signs[].extVerifyInfo.mathValidity`.
 
 ### Контур.Диадок API
 - Docs: https://developer.kontur.ru/doc/diadoc-api/index.html (has an OpenAPI spec and SDKs linked from there).

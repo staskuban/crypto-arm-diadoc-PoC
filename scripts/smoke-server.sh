@@ -3,7 +3,8 @@
 #   1. POST /cms/sign with only the public certificate and detached:true
 #      (the private key must already be installed in the container's uMy store);
 #   2. check the returned CMS is detached (does not embed the signed bytes);
-#   3. POST /cms/verify with the signed data -> isValidSign must be true;
+#   3. POST /cms/verify with the signed data -> isValidSign must be true
+#      (on a real server this includes the certificate chain: the test CA root must be in mroot);
 #   4. POST /cms/verify with tampered data -> isValidSign must not be true.
 #
 # Env:
@@ -76,7 +77,8 @@ post /cms/verify "$tmp/verify.json" >"$tmp/verify.out"
 is_valid_sign="$(jq -r '.isValidSign' "$tmp/verify.out")"
 is_valid="$(jq -r '.isValid' "$tmp/verify.out")"
 log "verify: isValidSign=$is_valid_sign isValid=$is_valid message=$(jq -r '.message // ""' "$tmp/verify.out")"
-[ "$is_valid_sign" = "true" ] || die "/cms/verify: signature is not valid"
+reasons="$(jq -r '[.signs[]?.cadesVfyStatusDescription | select(. != null)] | join("; ")' "$tmp/verify.out")"
+[ "$is_valid_sign" = "true" ] || die "/cms/verify: signature is not valid: ${reasons:-no reason given}"
 if [ "${SMOKE_STRICT:-0}" = "1" ] && [ "$is_valid" != "true" ]; then
   die "/cms/verify: isValid=$is_valid (SMOKE_STRICT=1)"
 fi

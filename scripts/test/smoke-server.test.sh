@@ -93,7 +93,7 @@ expect_failure "fails when the server returns an attached signature" "attached"
 start_mock sign_error
 expect_failure "fails when /cms/sign returns an HTTP error" "/cms/sign: HTTP 500"
 start_mock verify_invalid
-expect_failure "fails when /cms/verify reports an invalid signature" "signature is not valid"
+expect_failure "fails when /cms/verify reports an invalid signature, with the server's reason" "signature is not valid.*mock: chain broken"
 start_mock verify_always_valid
 expect_failure "fails when /cms/verify accepts tampered data" "accepted tampered data"
 start_mock no_cms

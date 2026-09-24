@@ -16,7 +16,7 @@ keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follo
 | Variable | Empty value means (verified 2026-09-24) |
 |---|---|
 | `CRYPTOPRO_LICENSE` | КриптоПро CSP trial: `License type: Demo`, 94 days left on first start |
-| `TRUSTED_LICENSE` | start script warns and continues; CSP and keys get installed, then `node dist/main.js` exits with `Trusted Crypto license is invalid` and the container restarts in a loop. **No signing without it.** |
+| `TRUSTED_LICENSE` | start script warns and continues; CSP and keys get installed, then `node dist/main.js` exits with `Trusted Crypto license is invalid` and the container restarts in a loop. **No signing without it.** A wrong key fails the same way even though `setup_license` prints "saved successfully". |
 
 The image is `linux/amd64` only. On Apple Silicon it runs under emulation, so it is slower.
 
@@ -46,16 +46,16 @@ The CSP key store lives in `./cert_storage` (git-ignored), so installed keys sur
 Clients send **only the public certificate** as `cert`. The server finds the private key in `uMy` by
 thumbprint. The smoke script refuses `.pfx`/`.p12`.
 
-Test material comes from upstream `certs/` (CRYPTO-PRO test CA). `scripts/fetch-test-certs.sh` downloads it
-and checks SHA-256:
+`scripts/fetch-test-certs.sh` downloads the test material and checks SHA-256:
 
-- `certs/cryptoarm.server.test.cer`: public certificate `CN=cryptoarm.server.test`, used by the smoke script.
-  It is **valid until 2026-10-28**.
-- `certs/user/cryptoarm.server.test.pfx`: its key container (no PIN).
-- `certs/root/crypto.root.test.cer`: upstream calls it the root, but it is **byte-identical to the leaf
-  certificate** above. The real issuer (`Тестовый УЦ ООО "КРИПТО-ПРО"`) is not installed. As a result, `/cms/verify`
-  may report `isValid=false` (chain) while `isValidSign=true`. By default the smoke script requires only
-  `isValidSign`. Set `SMOKE_STRICT=1` to also require `isValid`.
+- `certs/cryptoarm.server.test.cer` (upstream): public certificate `CN=cryptoarm.server.test`, used by the smoke
+  script. It is **valid until 2026-10-28**.
+- `certs/user/cryptoarm.server.test.pfx` (upstream): its key container (no PIN).
+- `certs/root/cryptopro-test-ca-2012-21.cer`: the self-signed root of the issuer, `Тестовый УЦ ООО "КРИПТО-ПРО"`.
+  It is downloaded from the certificate's AIA URL `http://testgost2012.cryptopro.ru/CertEnroll/testgost2012(21).crt`
+  and is also valid only until 2026-10-28. Upstream's `certs/crypto.root.test.cer` is **byte-identical to the leaf
+  certificate**. With only that file installed, `/cms/verify` returns `isValidSign=false` with the message «Не удалось
+  проверить цепочку сертификатов» even though `extVerifyInfo.mathValidity=true`. For that reason it is not used.
 
 ## Smoke script
 
@@ -63,7 +63,8 @@ and checks SHA-256:
 
 1. Signs a random payload with `{cert: <.cer>, data, detached: true}`.
 2. Checks that the CMS does not embed the payload, so the signature is detached.
-3. Verifies with `POST /cms/verify` and requires `isValidSign=true`.
+3. Verifies with `POST /cms/verify` and requires `isValidSign=true`. On the real server this flag includes the
+   certificate chain. If verification fails, the script prints the server's `cadesVfyStatusDescription`.
 4. Checks that tampered data is rejected.
 
 Env: `CRYPTOARM_SERVER_URL` (default `http://localhost:3037`), `CRYPTOARM_SERVER_API_KEY`, `CERT_FILE`,
