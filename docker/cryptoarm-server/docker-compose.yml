@@ -10,7 +10,7 @@ name: kryptoarm-diadoc-cryptoarm-server
 
 services:
   cryptoarm-server:
-    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:local}
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:i6}
     pull_policy: never
     platform: linux/amd64
     container_name: ${CRYPTOARM_CONTAINER_NAME:-kryptoarm-diadoc-cryptoarm-server}
@@ -70,4 +70,4 @@ services:
       platforms:
         - linux/amd64
     platform: linux/amd64
-    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:local}
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:i6}
