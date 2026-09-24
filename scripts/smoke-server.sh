@@ -9,11 +9,11 @@
 #
 # Env:
 #   CRYPTOARM_SERVER_URL      default http://localhost:3037
-#   CRYPTOARM_SERVER_API_KEY  sent as X-API-Key when set (AUTH_MODE=apikey)
+#   CRYPTOARM_SERVER_API_KEY  sent as X-API-Key when set (AUTH_MODE=apikey), via a header file (not argv)
 #   CERT_FILE                 public DER certificate (.cer), default: upstream test cert
 #   SMOKE_STRICT=1            also require isValid (full chain/revocation check) to be true
 #   SMOKE_TIMEOUT             per-request timeout in seconds, default 120 (amd64 emulation is slow)
-# Requires: bash, curl, jq, base64.
+# Requires: bash, curl >= 7.55 (-H @file), jq, base64.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,15 +36,20 @@ esac
 
 b64() { base64 | tr -d '\n'; }
 
+umask 077
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# The API key goes to curl as a header file (-H @file), so it never shows up in `ps`.
+auth_headers="$tmp/auth-headers"
+: >"$auth_headers"
+[ -n "$api_key" ] && printf 'X-API-Key: %s\n' "$api_key" >"$auth_headers"
 
 # post <path> <json-file> [allow-4xx] -> response body on stdout; fails on other non-2xx.
 # With allow-4xx a 4xx response prints {"httpStatus": <code>} instead of failing.
 post() {
   local path="$1" body="$2" allow_4xx="${3:-}" status
-  local -a headers=(-H 'Content-Type: application/json' -H 'Accept: application/json')
-  [ -n "$api_key" ] && headers+=(-H "X-API-Key: $api_key")
+  local -a headers=(-H 'Content-Type: application/json' -H 'Accept: application/json' -H "@$auth_headers")
   status="$(curl -sS --connect-timeout 10 --max-time "${SMOKE_TIMEOUT:-120}" -o "$tmp/resp" -w '%{http_code}' -X POST "${headers[@]}" \
     --data-binary "@$body" "$server_url$path")" || die "POST $path: request failed"
   case "$status" in

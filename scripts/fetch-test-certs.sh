@@ -8,6 +8,8 @@
 #       certs/crypto.root.test.cer is a copy of the leaf cert, so it is not used.
 # The files are git-ignored: they are test material, but keys are never committed.
 set -euo pipefail
+# Owner-only by default (the .pfx is a PIN-less private key); public certificates get 0644 below.
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 certs="$repo_root/docker/cryptoarm-server/certs"
@@ -22,8 +24,8 @@ sha256() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
-fetch() { # url, destination, expected sha256
-  local url="$1" dest="$2" want="$3" got name
+fetch() { # url, destination, expected sha256, mode
+  local url="$1" dest="$2" want="$3" mode="$4" got name
   name="$(basename "$dest")"
   mkdir -p "$(dirname "$dest")"
   curl -fsSL -o "$tmp/$name" "$url"
@@ -32,14 +34,15 @@ fetch() { # url, destination, expected sha256
     echo "checksum mismatch for $name: got $got, want $want" >&2
     exit 1
   fi
+  chmod "$mode" "$tmp/$name"
   mv "$tmp/$name" "$dest"
   echo "fetched $name -> ${dest#"$repo_root"/}"
 }
 
 fetch "$api/certs%2Fcryptoarm.server.test.cer/raw?ref=$ref" "$certs/cryptoarm.server.test.cer" \
-  e86e76e9448c87cc409bb09562367db8e41709499ced623a1e3dda1f694ccc54
+  e86e76e9448c87cc409bb09562367db8e41709499ced623a1e3dda1f694ccc54 0644
 fetch "http://testgost2012.cryptopro.ru/CertEnroll/testgost2012(21).crt" \
   "$certs/root/cryptopro-test-ca-2012-21.cer" \
-  6664740262766f0428379bb6ff2340c2d8497ce1862cd4e04f6353c2e978fb03
+  6664740262766f0428379bb6ff2340c2d8497ce1862cd4e04f6353c2e978fb03 0644
 fetch "$api/certs%2Fcryptoarm.server.test.pfx/raw?ref=$ref" "$certs/user/cryptoarm.server.test.pfx" \
-  940667a7a2ea91c0f3aa4e50cc91c3969c0ba83b500f76e02666e02ecc59ba64
+  940667a7a2ea91c0f3aa4e50cc91c3969c0ba83b500f76e02666e02ecc59ba64 0600

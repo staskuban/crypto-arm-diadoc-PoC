@@ -2,16 +2,25 @@
 
 Dockerized [КриптоАРМ Server](https://git.digtlab.ru/trusted/cryptoarm/server) that holds the signing
 keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follow upstream commit
-`af98d55e`. Local changes: an empty `TRUSTED_LICENSE` warns instead of aborting the start script (see the
-`Dockerfile` header); compose adds project-scoped names, `linux/amd64`, a loopback-only port, a read-only
-`certs` mount and a healthcheck.
+`af98d55e`. Local changes (see the `Dockerfile` header):
+
+- The base image is pinned: `server:1.4.25@sha256:065293ad…` (the same digest as `latest` on 2026-09-24).
+- The CSP tgz is bind-mounted into the install step, so it never ends up in an image layer.
+- `start.sh` (exec-form `ENTRYPOINT`) replaces upstream's shell-form `CMD`. It reads secrets from files and logs
+  `certmgr` errors, then execs the server under `init`. An empty `TRUSTED_LICENSE` warns instead of aborting.
+- Compose adds project-scoped names, `linux/amd64`, a loopback-only port, read-only `certs` and `secrets`
+  mounts, `cap_drop: [ALL]`, `no-new-privileges` and a healthcheck.
+- It also splits build and run (D8, see [Build and run](#run)).
+- `LOG_LEVEL` defaults to `warn,error`. At the `log` level the server prints the first 8 characters of the API key
+  on every request.
 
 ## Manual prerequisites
 
 1. Log in at cryptopro.ru and download **КриптоПро CSP 5.0 for Linux, x64, deb**
    (`linux-amd64_deb.tgz`, https://cryptopro.ru/products/csp/downloads).
 2. Put it at `docker/cryptoarm-server/cryptopro/linux-amd64_deb.tgz`. It is git-ignored.
-3. Obtain a **КриптоАРМ Server license key** (test key from the vendor) and set `TRUSTED_LICENSE` in `.env`.
+3. Obtain a **КриптоАРМ Server license key** (test key from the vendor) and put it in `secrets/trusted_license`
+   (see [Secrets](#secrets)).
 
 | Variable            | Empty value means (verified 2026-09-24)                                                                                                                                                                                                                                                        |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -24,22 +33,95 @@ The image is `linux/amd64` only. On Apple Silicon it runs under emulation, so it
 
 ```sh
 scripts/fetch-test-certs.sh                  # upstream test certs → docker/cryptoarm-server/certs (git-ignored)
-cp docker/cryptoarm-server/.env.example docker/cryptoarm-server/.env   # set TRUSTED_LICENSE, API_KEYS
-docker compose -f docker/cryptoarm-server/docker-compose.yml up -d --build
-docker compose -f docker/cryptoarm-server/docker-compose.yml ps   # wait for "healthy"
-CRYPTOARM_SERVER_API_KEY=<key from API_KEYS> scripts/smoke-server.sh
+cd docker/cryptoarm-server
+(umask 077; cp .env.example .env)            # non-secret settings only
+(umask 077; printf '%s' '<license key>' > secrets/trusted_license; openssl rand -hex 24 > secrets/api_keys)
+docker compose build cryptoarm-server-image  # build-only service (profile "build")
+docker compose up -d
+docker compose ps                            # wait for "healthy"
+CRYPTOARM_SERVER_API_KEY="$(head -1 secrets/api_keys)" SMOKE_STRICT=1 ../../scripts/smoke-server.sh
 ```
 
-Stop with `docker compose -f docker/cryptoarm-server/docker-compose.yml down` (project
-`kryptoarm-diadoc-cryptoarm-server`). Swagger is at http://localhost:3037/docs. The healthcheck calls `GET /health/memory`, which needs no API key.
+From the repo root, the same commands work, because the root compose file `include`s this one. Pick one place
+and stick to it. The project name is `kryptoarm-diadoc-cryptoarm-server` in this directory and the worktree
+directory name from the root: the shared stand is project `graph-root`. The container name is fixed either way.
+Stop with `docker compose down`.
+Swagger is at http://localhost:3037/docs. The healthcheck calls `GET /health/memory`, which needs no API key.
+
+**Build and run are separate (D8).** `cryptoarm-server` has no `build` section and `pull_policy: never`. The image
+comes only from the build-only service `cryptoarm-server-image` (same tag, profile `build`). So `up`, and
+`docker compose run --build app` from the root, can never rebuild the server image or recreate the container
+because of a new image. `up` on a machine without the image fails with "No such image": build it first. The
+container is still recreated when its _config_ changes (another worktree, a changed `.env` or compose file).
+Check with `docker compose --dry-run up -d` that it stays `Running`. The image tag is shared by all worktrees:
+building `cryptoarm-server-image` with the default tag anywhere else moves `…:local`, and the next `up` (or `run app`
+without `--no-deps`) in `graph-root` recreates the shared stand on that image. Build the default tag only from
+`graph-root`, override `CRYPTOARM_SERVER_IMAGE` elsewhere, and keep using `run --rm --no-deps app`.
+
+**Throwaway stand** next to the shared one (other project, container, image tag and port; its own `cert_storage`
+and `secrets` in that worktree):
+
+```sh
+export CRYPTOARM_SERVER_IMAGE=kryptoarm-diadoc/cryptoarm-server:i5 \
+  CRYPTOARM_CONTAINER_NAME=kryptoarm-diadoc-i5-cryptoarm-server CRYPTOARM_SERVER_PORT=3038 \
+  APP_IMAGE=kryptoarm-diadoc/app:i5
+docker compose -p kryptoarm-diadoc-i5 build cryptoarm-server-image
+docker compose -p kryptoarm-diadoc-i5 up -d
+# ... tests against http://127.0.0.1:3038 ...
+docker compose -p kryptoarm-diadoc-i5 down
+```
+
+`scripts/issue-test-cert.sh` names the container with `CRYPTOARM_CONTAINER` (not `CRYPTOARM_CONTAINER_NAME`): set
+both on a throwaway stand, or it enrolls into the shared one.
+
+## Secrets
+
+`start.sh` reads each of `TRUSTED_LICENSE`, `CRYPTOPRO_LICENSE`, `CRYPTOPRO_TSP_LICENSE`,
+`CRYPTOPRO_OCSP_LICENSE` and `API_KEYS` from the first source that exists:
+
+1. `<VAR>_FILE`: an explicit path. The start fails if it is not readable.
+2. `/run/secrets/<var>`, lower-case: the files in `./secrets`, mounted read-only.
+3. The env value from `.env`. This is the legacy path; a file wins over it, with a warning.
+
+`./secrets` is git-ignored except `.gitkeep`. Create the files with `umask 077`. Values in `.env` reach the
+container config (`docker inspect`) and `/proc/*/environ`. Values in files do not.
+
+The server process gets `TRUSTED_LICENSE=""` and `CRYPTOPRO_LICENSE=""`: it only checks that they are defined.
+The КриптоАРМ license is written to `/etc/opt/Trusted/CryptoARM Server/license.lic`, the same file upstream's
+`setup_license` writes. `API_KEYS` must stay in the server's env, because the server reads it only from there.
+The file may hold one key per line.
+
+What is still exposed: `cpconfig`/`tsputil`/`ocsputil`/`certmgr` accept the CSP licenses and PFX PINs only as
+argv. They are visible in the container's process list for the duration of that call at start.
+
+**Migration of an existing stand:** build the new image **first**
+(`docker compose build cryptoarm-server-image`). The compose config of the server changed (`init`, `cap_drop`,
+the `secrets` mount), so the next `up -d` or `run app` without `--no-deps` recreates the container. If the tag
+still points to the old image, the old start script cannot read `secrets/`, and with the license already moved
+out of `.env` the server restart-loops. Then move `TRUSTED_LICENSE`, `CRYPTOPRO_LICENSE` and `API_KEYS` from `.env`
+into `secrets/`, leave them empty in `.env`, set `LOG_LEVEL=warn,error`, and run `up -d`. Unchanged `.env` values
+keep working. `cert_storage` (installed keys) is kept.
+
+**Linux hosts:** on Docker Desktop, bind-mounted files appear as `root:root` in the container, so the server
+reads 0600 files with no capabilities (verified). On a Linux host they keep the owner's uid, and root without
+`CAP_DAC_READ_SEARCH` cannot read another user's 0600 file or 0700 directory (verified with `--cap-drop ALL`).
+There, either `chown root` the `secrets`/`certs` files, or add `cap_add: [DAC_READ_SEARCH]` in a
+`docker-compose.override.yml`. `cert_storage` must be owned by root; Docker creates it that way if it is missing.
 
 ## Certificates and keys
 
 At start, the container installs everything under the `./certs` mount (read-only):
 
 - `certs/root/*.cer` go to the `mroot` store.
-- `certs/user/*.pfx` go to the `uMy` store. These containers must have no PIN. For containers with a PIN, use
-  `CERT_PFX_BASE64` + `CERT_PFX_PIN` in `.env`.
+- `certs/user/*.pfx` go to the `uMy` store. These containers must have no PIN.
+- `secrets/*.pfx|*.p12` go to `uMy` too, with the PIN from `secrets/<name>.pfx.pin` if that file exists. Put real
+  keys here.
+- `CERT_PFX_BASE64` + `CERT_PFX_PIN` in `.env` are for **test keys only**: env is readable via `docker inspect`.
+  The PINs match the containers by index, or one PIN applies to all.
+
+A failed install is logged with `certmgr`'s output, with the PIN redacted. The start continues, so a broken PFX
+shows up in `docker logs` as `cryptoarm-start: ERROR: installing key container … failed`, and a summary
+`WARNING: N certificate/key install(s) failed` follows it. Re-installing on restart succeeds (verified).
 
 The CSP key store lives in `./cert_storage` (git-ignored), so installed keys survive restarts.
 
@@ -142,5 +224,7 @@ Notes:
 Env: `CRYPTOARM_SERVER_URL` (default `http://localhost:3037`), `CRYPTOARM_SERVER_API_KEY`, `CERT_FILE`,
 `SMOKE_STRICT`. Requires `curl`, `jq`, `base64`.
 
-Tests (they use a fake server, so no Docker is needed): `scripts/test/smoke-server.test.sh` and
-`scripts/test/setup-trusted-license.test.sh`.
+The API key is passed to curl as a header file (`-H @file`), so it does not appear in `ps`.
+
+Tests (they use fakes, so no Docker is needed): `scripts/test/smoke-server.test.sh` and
+`scripts/test/cryptoarm-start.test.sh` (the entrypoint, with fake CSP tools).
