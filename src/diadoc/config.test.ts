@@ -99,6 +99,21 @@ describe('loadDiadocEnv', () => {
     expect(String(error)).not.toMatch(/pw/);
   });
 
+  it.each([
+    ['DIADOC_API_URL', 'https://user:pw-SECRET@diadoc.example'],
+    ['DIADOC_API_URL', 'https://user@diadoc.example'],
+    ['DIADOC_API_URL', 'https://:pw-SECRET@diadoc.example'],
+    ['DIADOC_TOKEN_URL', 'https://user:pw-SECRET@idp.example/connect/token'],
+    ['DIADOC_TOKEN_URL', 'http://user:pw-SECRET@localhost:8080/token'],
+  ])('rejects credentials in %s without echoing them: %s', async (name, url) => {
+    const error: unknown = await loadDiadocEnv({ ...base, [name]: url }, noFile).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(DiadocConfigError);
+    expect(String(error)).toMatch(new RegExp(`${name} must not contain credentials`));
+    expect(String(error)).not.toMatch(/pw-SECRET|user[:@]/);
+  });
+
   it('rejects a bad timeout', async () => {
     await expect(loadDiadocEnv({ ...base, DIADOC_TIMEOUT_MS: '0' }, noFile)).rejects.toThrow(
       /DIADOC_TIMEOUT_MS/,

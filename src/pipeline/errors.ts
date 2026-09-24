@@ -30,6 +30,11 @@ export type PipelineErrorCode =
   /** CanPostMessage reported blocking errors (`details`). */
   | 'PRECHECK_REJECTED'
   | 'PRECHECK_FAILED'
+  /**
+   * The Diadoc token endpoint refused or failed (see `cause`: DiadocAuthError; `step` says where),
+   * before anything was posted. `invalid_grant` needs a new refresh token, not a retry.
+   */
+  | 'DIADOC_AUTH'
   | 'SHELF_UPLOAD_FAILED'
   /**
    * 409 whose text says the document was already posted. Diadoc gives no ids here; find the message

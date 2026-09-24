@@ -569,6 +569,21 @@ describe('sendUtd over the real clients (seam)', () => {
     expect((error as PipelineError).message).not.toContain('may have been posted');
     expect(net.to('/V3/PostMessage')).toHaveLength(1);
   });
+
+  it('reports a burnt refresh token as DIADOC_AUTH with a hint, without secrets (R2 minor 11)', async () => {
+    const { net, send } = setup();
+    net.next(IDP, () => json({ error: 'invalid_grant' }, 400));
+
+    const error = await send(CONTENT).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: 'DIADOC_AUTH', step: 'precheck' });
+    const { message, operationId } = error as PipelineError;
+    expect(operationId).toBe(GOLDEN_OPERATION_ID);
+    expect(message).toMatch(/invalid_grant.*issue a new one in the integrator cabinet/);
+    expect(message).not.toMatch(/rt-1|secret\b/);
+    expect(net.to('/CanPostMessage')).toHaveLength(0);
+    expect(net.to('/V3/PostMessage')).toHaveLength(0);
+  });
 });
 
 describe('sendUtd over the real signer, failures (seam)', () => {

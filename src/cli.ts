@@ -244,6 +244,8 @@ async function createDiadoc(
   }
   try {
     const config = await loadDiadocEnv(env);
+    // No DIADOC_TIMEOUT_MS here (D-6): a longer IdP timeout would keep a token refresh from starting
+    // inside the PostMessage budget (auth.ts starts one only if its full timeout fits).
     const auth = new RefreshTokenAuth({
       clientId: config.clientId,
       clientSecret: config.clientSecret,

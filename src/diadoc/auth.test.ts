@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_TOKEN_URL, RefreshTokenAuth, type RefreshTokenAuthOptions } from './auth.js';
-import { DiadocAuthError } from './errors.js';
+import { DiadocAuthError, DiadocTokenDeadlineError } from './errors.js';
 
 interface Call {
   url: string;
@@ -272,11 +272,14 @@ describe('RefreshTokenAuth', () => {
   });
 
   it('throws DiadocAuthError with status and OAuth error code, without leaking secrets', async () => {
-    const { auth } = makeAuth([jsonResponse({ error: 'invalid_client' }, 400)]);
+    // The hint names DIADOC_CLIENT_SECRET, so the secret value has to be distinct from that name.
+    const { auth } = makeAuth([jsonResponse({ error: 'invalid_client' }, 400)], {
+      clientSecret: 'S3CR3T-VALUE',
+    });
     const err = await auth.getAccessToken().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DiadocAuthError);
     expect(err).toMatchObject({ status: 400, oauthError: 'invalid_client' });
-    expect((err as Error).message).not.toMatch(/SECRET|RT0|client_secret|refresh_token=/);
+    expect((err as Error).message).not.toMatch(/S3CR3T|RT0|client_secret|refresh_token=/);
   });
 
   it('does not cache a failure: the next call retries', async () => {
@@ -296,6 +299,119 @@ describe('RefreshTokenAuth', () => {
   it('rejects a non-JSON response', async () => {
     const { auth } = makeAuth([new Response('<html>oops</html>', { status: 200 })]);
     await expect(auth.getAccessToken()).rejects.toBeInstanceOf(DiadocAuthError);
+  });
+
+  it('never echoes the body of a non-JSON 2xx answer (it may carry fresh tokens)', async () => {
+    const body = 'access_token=AT-SECRET&refresh_token=RT-SECRET&expires_in=3600';
+    const { auth } = makeAuth([
+      new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      }),
+    ]);
+    const err = await auth.getAccessToken().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocAuthError);
+    expect(err).toMatchObject({ status: 200 });
+    const text = String(err);
+    expect(text).not.toMatch(/SECRET/);
+    expect(text).toMatch(/non-JSON/);
+    expect(text).toMatch(/application\/x-www-form-urlencoded/);
+    expect(text).toContain(`${String(Buffer.byteLength(body))} bytes`);
+  });
+
+  it('tells to issue a new refresh token on invalid_grant, without the token', async () => {
+    const { auth } = makeAuth([jsonResponse({ error: 'invalid_grant' }, 400)]);
+    const err = await auth.getAccessToken().catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 400, oauthError: 'invalid_grant' });
+    const text = String(err);
+    expect(text).toMatch(/refresh token was rejected/);
+    expect(text).toMatch(/issue a new one in the integrator cabinet/);
+    expect(text).toMatch(/DIADOC_REFRESH_TOKEN_FILE/);
+    expect(text).toMatch(/\.tmp/);
+    expect(text).not.toMatch(/RT0|SECRET/);
+  });
+
+  it('points at the client credentials on invalid_client', async () => {
+    const { auth } = makeAuth([jsonResponse({ error: 'invalid_client' }, 401)], {
+      clientSecret: 'S3CR3T-VALUE',
+    });
+    const err = await auth.getAccessToken().catch((e: unknown) => e);
+    expect(String(err)).toMatch(/check DIADOC_CLIENT_ID and DIADOC_CLIENT_SECRET/);
+    expect(String(err)).not.toMatch(/S3CR3T-VALUE/);
+  });
+
+  it('adds no hint to other token errors', async () => {
+    const { auth } = makeAuth([jsonResponse({ error: 'unsupported_grant_type' }, 400)]);
+    const err = await auth.getAccessToken().catch((e: unknown) => e);
+    expect(String(err)).not.toMatch(/integrator cabinet|DIADOC_CLIENT_ID/);
+  });
+
+  it('keeps the body of a non-2xx answer (the OAuth error) in the message', async () => {
+    const { auth } = makeAuth([jsonResponse({ error: 'invalid_grant' }, 400)]);
+    await expect(auth.getAccessToken()).rejects.toThrow(/400: .*invalid_grant/);
+  });
+});
+
+describe('RefreshTokenAuth secrets in errors (F12)', () => {
+  it('prints the token URL without query, fragment or userinfo', async () => {
+    const { auth } = makeAuth([jsonResponse({ error: 'invalid_grant' }, 400)], {
+      tokenUrl: 'https://idp.example/connect/token?gw_key=GW-SECRET#frag',
+    });
+    const text = String(await auth.getAccessToken().catch((e: unknown) => e));
+    expect(text).toContain('https://idp.example/connect/token');
+    expect(text).not.toMatch(/GW-SECRET|frag/);
+  });
+
+  it('cuts the secrets out of a non-2xx body that echoes the request', async () => {
+    const echoed =
+      'bad request: grant_type=refresh_token&client_id=CID&client_secret=S3CR3T-VALUE&refresh_token=RT-VALUE';
+    const { auth } = makeAuth([new Response(echoed, { status: 400 })], {
+      clientSecret: 'S3CR3T-VALUE',
+      refreshToken: 'RT-VALUE',
+    });
+    const text = String(await auth.getAccessToken().catch((e: unknown) => e));
+    expect(text).toMatch(/400: bad request/);
+    expect(text).not.toMatch(/S3CR3T-VALUE|RT-VALUE/);
+  });
+});
+
+describe('RefreshTokenAuth expiry margin (R2 minor 9)', () => {
+  it('caps a huge expires_in at one day', async () => {
+    const { auth, calls, clock } = makeAuth([
+      tokenResponse('AT1', undefined, 1e306),
+      tokenResponse('AT2'),
+    ]);
+    expect(await auth.getAccessToken()).toBe('AT1');
+    clock.t += 86_400_000 - 60_000;
+    expect(await auth.getAccessToken()).toBe('AT2');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('caps the margin at half the lifetime for a short expires_in', async () => {
+    const { auth, calls, clock } = makeAuth(
+      [tokenResponse('AT1', undefined, 30), tokenResponse('AT2', undefined, 30)],
+      { expiryMarginMs: 60_000 },
+    );
+    expect(await auth.getAccessToken()).toBe('AT1');
+    clock.t += 15_000 - 1;
+    expect(await auth.getAccessToken()).toBe('AT1');
+    expect(calls).toHaveLength(1);
+    clock.t += 1;
+    expect(await auth.getAccessToken()).toBe('AT2');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('keeps the full margin when it is below half the lifetime', async () => {
+    const { auth, calls, clock } = makeAuth(
+      [tokenResponse('AT1', undefined, 121), tokenResponse('AT2')],
+      { expiryMarginMs: 60_000 },
+    );
+    expect(await auth.getAccessToken()).toBe('AT1');
+    clock.t += 61_000 - 1;
+    expect(await auth.getAccessToken()).toBe('AT1');
+    clock.t += 1;
+    expect(await auth.getAccessToken()).toBe('AT2');
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -318,6 +434,7 @@ describe('RefreshTokenAuth deadline and abort (R2 minor 8)', () => {
   it('does not start a token request that could not end before the deadline', async () => {
     const { auth, calls, clock } = makeAuth([tokenResponse('AT1')], { timeoutMs: 30_000 });
     const err = await auth.getAccessToken({ deadline: clock.t + 29_999 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocTokenDeadlineError);
     expect(err).toBeInstanceOf(DiadocAuthError);
     expect((err as Error).message).toMatch(/not asked.*30 s.*deadline/);
     expect(calls).toHaveLength(0);

@@ -198,6 +198,24 @@ describe('cli', () => {
     expect(err.join('')).toMatch(/SIGNATURE_INVALID.*verify: bad.*op-1/s);
   });
 
+  it('exits 1 with DIADOC_AUTH and the hint for a rejected refresh token', async () => {
+    const { deps, err } = setup(() =>
+      Promise.reject(
+        new PipelineError(
+          'DIADOC_AUTH',
+          'precheck',
+          'Token endpoint https://idp/token -> 400: {"error":"invalid_grant"}; the refresh token ' +
+            'was rejected (…): issue a new one in the integrator cabinet',
+          { operationId: 'op-1' },
+        ),
+      ),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(
+      /^error \[DIADOC_AUTH\] precheck: .*invalid_grant.*integrator cabinet.*\(operationId op-1\)$/m,
+    );
+  });
+
   it('exits 4 when posted but not trackable, printing the messageId', async () => {
     const { deps, err } = setup(() =>
       Promise.reject(
