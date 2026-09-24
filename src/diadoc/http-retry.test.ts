@@ -118,6 +118,15 @@ describe('fetchWithRetry', () => {
     expect(slept).toEqual([1000]);
   });
 
+  it('still sleeps when the total wait reaches the budget exactly', async () => {
+    const { promise, slept, attempts } = run([status(503), status(503), status(503)], {
+      policy: { ...POLICY, budgetMs: 3000 },
+    });
+    expect((await promise).status).toBe(503);
+    expect(slept).toEqual([1000, 2000]);
+    expect(attempts).toEqual([1, 2, 3]);
+  });
+
   it('never sleeps past the deadline', async () => {
     const { promise, slept } = run([status(503), status(503)], { deadline: 1_000_000 + 1500 });
     expect((await promise).status).toBe(503);
@@ -152,6 +161,16 @@ describe('fetchWithRetry', () => {
     const { promise, attempts } = run([reason], { signal: controller.signal });
     await expect(promise).rejects.toBe(reason);
     expect(attempts).toEqual([1]);
+  });
+
+  it('rethrows a transient error at once when the caller signal aborted meanwhile', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('shutdown'));
+    const reset = fetchFailed('ECONNRESET'); // e.g. the abort tore down the connection
+    const { promise, attempts, slept } = run([reset, status(200)], { signal: controller.signal });
+    await expect(promise).rejects.toBe(reset);
+    expect(attempts).toEqual([1]);
+    expect(slept).toEqual([]);
   });
 
   it('cancels the body of a response it discards', async () => {

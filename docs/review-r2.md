@@ -81,15 +81,15 @@ How it was checked:
     - Fix: warn at start when `.tmp` exists; compare `st_dev` of the file and its directory; accept `--`.
 
 ### ASN.1 and signature policy (area c)
-15. **Embedded-certificate check misses the SKI form of `sid`** — **(probe)**. `src/pipeline/signature-policy.ts:76-78` compares the embedded copy only by issuer + serial. With `sid = subjectKeyIdentifier`, a CMS can embed a different certificate with the same SKI, and `cmsPolicyViolations` returns `[]`. The verifier thumbprint check still rejects it, so this is not a bypass. The comment at `:55` promises more than the code does. Fix: treat an embedded certificate that matches by SKI and differs from `cert.der` as a violation too.
-16. **The `sid` parser ignores extra elements, and versions are not checked** — **(probe)**. `src/asn1/cms.ts:130` destructures `[issuer, serial]`, so an `IssuerAndSerialNumber` with a trailing `05 00` is accepted. SignerInfo/SignedData versions (`cms.ts:101`) are not checked against the `sid` form (RFC 5652 §5.3). This extends R1 minor 17. Fix: require exactly two elements.
+15. **Embedded-certificate check misses the SKI form of `sid`** — **(probe)** — **fixed in F15** (an embedded certificate the sid names in either form must equal the configured one). `src/pipeline/signature-policy.ts:76-78` compares the embedded copy only by issuer + serial. With `sid = subjectKeyIdentifier`, a CMS can embed a different certificate with the same SKI, and `cmsPolicyViolations` returns `[]`. The verifier thumbprint check still rejects it, so this is not a bypass. The comment at `:55` promises more than the code does. Fix: treat an embedded certificate that matches by SKI and differs from `cert.der` as a violation too.
+16. **The `sid` parser ignores extra elements, and versions are not checked** — **(probe)** — **fixed in F15** (exactly two elements; SignerInfo version checked against the sid form; the SignedData version is still not checked). `src/asn1/cms.ts:130` destructures `[issuer, serial]`, so an `IssuerAndSerialNumber` with a trailing `05 00` is accepted. SignerInfo/SignedData versions (`cms.ts:101`) are not checked against the `sid` form (RFC 5652 §5.3). This extends R1 minor 17. Fix: require exactly two elements.
 17. **A non-DER or PEM `SIGNER_CERT_PATH` fails late and with the wrong code** — **(read)**.
     - `src/signer/config.ts:139-151` only reads the file. The certificate is parsed only inside `sendUtd` (`send.ts:175`), after the УПД was parsed.
     - A PEM "Base-64" `.cer` (the usual Windows export) gives `error [CERTIFICATE_INVALID] … expected tag 0x30`, which reads like an expired certificate.
     - `readDer` also accepts non-minimal lengths (`04 81 01 aa`), and `readSignerCertificate` (`signature-policy.ts:33`) has no `isDerFramed` check. That case fails closed (thumbprint mismatch).
     - Fix: parse the certificate in the signer config and throw `SIGNER_CONFIG` "must be DER", or convert PEM to DER.
-18. **`classifyVerifyFailure` blames our certificate when the verifier named none** — **(probe)**. `signature-policy.ts:116-156`: `{ valid: false, signers: [{ mathValid: true, chainValid: false }] }` without a thumbprint gives `CERTIFICATE_INVALID` "signer certificate <our thumbprint> is valid until …". The send is still refused; only the diagnosis is wrong. Fix: say "signer not confirmed" when the thumbprint is missing.
-19. **Thumbprints are compared only case-insensitively** — **(probe)**. `signature-policy.ts:162`. `AB:CD:…` or hex with spaces (the КриптоПро/Windows formats) would give a false `SIGNATURE_POLICY_VIOLATION`. It fails closed, and today's server returns bare hex (integration test). Fix: strip non-hex characters before comparing.
+18. **`classifyVerifyFailure` blames our certificate when the verifier named none** — **(probe)** — **fixed in F15** ("signer not confirmed"; our certificate is named only when it has expired). `signature-policy.ts:116-156`: `{ valid: false, signers: [{ mathValid: true, chainValid: false }] }` without a thumbprint gives `CERTIFICATE_INVALID` "signer certificate <our thumbprint> is valid until …". The send is still refused; only the diagnosis is wrong. Fix: say "signer not confirmed" when the thumbprint is missing.
+19. **Thumbprints are compared only case-insensitively** — **(probe)** — **fixed in F15** (whitespace, `:` and `-` are ignored; other characters are not dropped, so the check still fails closed). `signature-policy.ts:162`. `AB:CD:…` or hex with spaces (the КриптоПро/Windows formats) would give a false `SIGNATURE_POLICY_VIOLATION`. It fails closed, and today's server returns bare hex (integration test). Fix: strip non-hex characters before comparing.
 
 ### Stands and scripts (area d)
 20. **`smoke-documents.sh` can reset the admin password to a value that is never saved** — **(read; live UNVERIFIED)**.
@@ -109,7 +109,7 @@ How it was checked:
 26. **Licence-setting tools' output is not redacted** — **UNVERIFIED**. `start.sh:130,140,145` (`cpconfig -license -set`, `tsputil`/`ocsputil license -s`) log stdout/stderr as is, while `-view` is filtered (`:135`). Check with a real serial (D42).
 
 ### Test gaps (mutations the suite does not catch)
-27. The code is correct today in each case; a regression would pass `npm test`.
+27. The code is correct today in each case; a regression would pass `npm test`. **Диадок / pipeline and ASN.1 / policy gaps closed in F15** (each mutation re-run and caught, list in the F15 row of `docs/plan.md`); the signer gaps are F14's.
     - Signer:
       - the `expiresAt` branch of the login JWT (`documents-cloud-signer.ts:271-272`: all mocks use exactly 15 min);
       - caller abort while reading a body (`:336`: without it the CLI prints `SIGN_FAILED` instead of `INTERRUPTED`);

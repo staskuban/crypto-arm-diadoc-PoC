@@ -52,7 +52,9 @@ export function validityProblem(cert: SignerCertificate, now: number): string | 
 
 /**
  * Structural policy on the CMS itself: detached, exactly one SignerInfo, whose SignerIdentifier
- * names the configured certificate; an embedded copy of that certificate must be byte-identical.
+ * names the configured certificate; every embedded certificate that sid also names (by issuer and
+ * serial, or by subjectKeyIdentifier) must be byte-identical to the configured one (one this parser
+ * cannot read is skipped: the verifier thumbprint check still covers it).
  * The sid is only a claim: that the named key made the signature is proven by the verifier
  * (`verifiedSignerViolations`). Countersignatures (unsigned attributes) are not inspected.
  * @throws Asn1Error when the signature is not a DER-framed CMS SignedData.
@@ -73,9 +75,7 @@ export function cmsPolicyViolations(signature: Buffer, cert: SignerCertificate):
       violations.push(
         `CMS is signed, but not by the configured certificate ${cert.thumbprint}: ${describeSid(sid)}`,
       );
-    } else if (
-      cms.certificates.some((der) => !der.equals(cert.der) && sameIssuerSerial(der, cert.info))
-    ) {
+    } else if (cms.certificates.some((der) => !der.equals(cert.der) && namedBySid(der, sid))) {
       violations.push(
         `the embedded certificate of the signer differs from the configured one ${cert.thumbprint}`,
       );
@@ -143,8 +143,17 @@ export function classifyVerifyFailure(
     };
   }
   const notAfter = cert.info.notAfter.toISOString();
-  const expiry =
-    now > cert.info.notAfter.getTime()
+  const expired = now > cert.info.notAfter.getTime();
+  // Blame the configured certificate only when the verifier says it saw that one.
+  const confirmed = result.signers.some(
+    (s) => s.thumbprint !== undefined && normalizeThumbprint(s.thumbprint) === cert.thumbprint,
+  );
+  const expiry = !confirmed
+    ? 'the verifier names no signer certificate (signer not confirmed); ' +
+      (expired
+        ? `the configured certificate ${cert.thumbprint} expired on ${notAfter}`
+        : 'check the CA chain (root and intermediates) in the server store')
+    : expired
       ? `signer certificate ${cert.thumbprint} expired on ${notAfter}; install a new one`
       : `signer certificate ${cert.thumbprint} is valid until ${notAfter}; ` +
         'check the CA chain (root and intermediates) in the server store';
@@ -156,14 +165,21 @@ export function classifyVerifyFailure(
   };
 }
 
-/** The first thumbprint the verifier reports that is not the configured certificate's. */
+/**
+ * The first thumbprint the verifier reports that is not the configured certificate's. Separators
+ * (`AB:CD`, `ab cd`, `ab-cd`) and case do not matter; nothing else is dropped.
+ */
 function thumbprintMismatch(result: VerifyResult, cert: SignerCertificate): string | undefined {
   const other = result.signers
-    .map((s) => s.thumbprint?.toLowerCase())
-    .find((t) => t !== undefined && t !== cert.thumbprint);
+    .map((s) => s.thumbprint)
+    .find((t) => t !== undefined && normalizeThumbprint(t) !== cert.thumbprint);
   return other === undefined
     ? undefined
     : `verifier reports signer thumbprint ${other}, expected ${cert.thumbprint}`;
+}
+
+function normalizeThumbprint(thumbprint: string): string {
+  return thumbprint.replace(/[\s:-]/g, '').toLowerCase();
 }
 
 function identifies(sid: CmsSignerId, cert: CertificateInfo): boolean {
@@ -173,14 +189,15 @@ function identifies(sid: CmsSignerId, cert: CertificateInfo): boolean {
   return sid.issuer.equals(cert.issuer) && sid.serialNumber.equals(cert.serialNumber);
 }
 
-function sameIssuerSerial(der: Buffer, cert: CertificateInfo): boolean {
+/** Whether the sid also names this embedded certificate. */
+function namedBySid(der: Buffer, sid: CmsSignerId): boolean {
   let info: CertificateInfo;
   try {
     info = parseCertificate(der);
   } catch {
     return false; // an unparsable extra certificate cannot be the signer's
   }
-  return info.issuer.equals(cert.issuer) && info.serialNumber.equals(cert.serialNumber);
+  return identifies(sid, info);
 }
 
 function describeSid(sid: CmsSignerId): string {

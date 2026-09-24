@@ -27,7 +27,7 @@ import {
   type Signer,
   type VerifyResult,
 } from '../signer/index.js';
-import { parseCmsSignedData } from '../asn1/index.js';
+import { derChildren, parseCmsSignedData, readDer } from '../asn1/index.js';
 import { UtdError } from '../utd/index.js';
 import { PipelineError } from './errors.js';
 import { operationIdFor, type OperationKey } from './operation-id.js';
@@ -380,6 +380,15 @@ describe('sendUtd failures before sending', () => {
     expect(signer.signed).toHaveLength(0);
   });
 
+  // Relies on parseUtd refusing a blank buffer at once (55 ms today); it must not decode it all first.
+  it('accepts content of exactly the shelf maximum past the size check', async () => {
+    const { run } = setup();
+    const error = await failure(
+      run({ fileName: FILE_NAME, content: Buffer.alloc(SHELF_MAX_BYTES, 0x20) }),
+    );
+    expect(error).toMatchObject({ code: 'INVALID_UTD', step: 'parse' });
+  });
+
   it('wraps a signer failure', async () => {
     const { signer, diadoc, run } = setup();
     const cause = new SignerTimeoutError('sign', 10);
@@ -413,7 +422,7 @@ describe('sendUtd failures before sending', () => {
     const chain = setup();
     chain.signer.verifyResult = {
       valid: false,
-      signers: [{ valid: false, mathValid: true, chainValid: false }],
+      signers: [{ valid: false, mathValid: true, chainValid: false, thumbprint: THUMBPRINT }],
       reason: 'untrusted root',
     };
     const chainError = await failure(chain.run());
@@ -479,6 +488,27 @@ describe('sendUtd failures before sending', () => {
     signer.signResult = { signature: BER_SIGNATURE };
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'INVALID_SIGNATURE', step: 'policy' });
+    expect(signer.verified).toHaveLength(0);
+    expect(diadoc.calls).toHaveLength(0);
+  });
+
+  it('rejects a malformed SignerInfo (version 3 with issuerAndSerialNumber) as INVALID_SIGNATURE', async () => {
+    const signedData = derChildren(
+      derChildren(readDer(DER_SIGNATURE))[1] ?? readDer(DER_SIGNATURE),
+    )[0];
+    const signerInfo = derChildren(
+      derChildren(signedData ?? readDer(DER_SIGNATURE)).at(-1) ?? readDer(DER_SIGNATURE),
+    )[0];
+    if (signerInfo === undefined) throw new Error('fixture');
+    const versionAt = signerInfo.offset + signerInfo.raw.length - signerInfo.content.length + 2;
+    const v3 = Buffer.from(DER_SIGNATURE);
+    expect(v3[versionAt]).toBe(1);
+    v3[versionAt] = 3;
+    const { signer, diadoc, run } = setup();
+    signer.signResult = { signature: v3 };
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'INVALID_SIGNATURE', step: 'policy' });
+    expect(error.message).toMatch(/SignerInfo version must be 1/);
     expect(signer.verified).toHaveLength(0);
     expect(diadoc.calls).toHaveLength(0);
   });
@@ -623,6 +653,17 @@ describe('sendUtd status polling', () => {
       polls: 5,
       status: status('Error', 'Ошибка проверки подписи'),
     });
+    expect(result.statusError).toBeUndefined();
+  });
+
+  it('keeps polling after a 404 (the new document may not be visible yet)', async () => {
+    const { diadoc, run } = setup();
+    diadoc.documents = [
+      new DiadocError('GET', '/V3/GetDocument', 404, 'not found'),
+      { DocflowStatus: status('Success', 'Подписан') },
+    ];
+    const result = await run();
+    expect(result).toMatchObject({ outcome: 'success', final: true, polls: 2 });
     expect(result.statusError).toBeUndefined();
   });
 

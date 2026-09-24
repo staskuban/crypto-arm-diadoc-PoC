@@ -68,11 +68,25 @@ function cms(parts: { encap?: Buffer; certs?: Buffer | null; signerInfos?: Buffe
   );
 }
 
-/** The real SignerInfo with its sid replaced. */
+/** The real SignerInfo with its sid replaced (and the version RFC 5652 requires for that sid). */
 function signerInfoWithSid(sid: Buffer): Buffer {
-  const [version, , ...rest] = derChildren(readDer(SIGNER_INFO)).map((c) => c.raw);
-  return tlv(0x30, version ?? Buffer.alloc(0), sid, ...rest);
+  const [, , ...rest] = derChildren(readDer(SIGNER_INFO)).map((c) => c.raw);
+  return tlv(0x30, tlv(0x02, Buffer.from([sid[0] === 0x80 ? 3 : 1])), sid, ...rest);
 }
+
+/** A copy of the certificate DER with one byte of its issuer Name changed (same serial and SKI). */
+function withOtherIssuer(der: Buffer): Buffer {
+  const issuer = parseCmsSignedData(CMS).signers[0];
+  if (issuer === undefined || !('issuer' in issuer)) throw new Error('fixture sid');
+  const at = der.indexOf(issuer.issuer) + issuer.issuer.length - 1; // last byte of a string value
+  const copy = Buffer.from(der);
+  copy[at] = (copy[at] ?? 0) ^ 0x01;
+  return copy;
+}
+
+/** `AB:CD:…` and `ab cd …`: the КриптоПро / Windows ways to print a thumbprint. */
+const colons = (t: string): string => (t.toUpperCase().match(/../g) ?? []).join(':');
+const spaced = (t: string): string => (t.match(/../g) ?? []).join(' ');
 
 const signer = readSignerCertificate(CERT);
 const other = readSignerCertificate(OTHER_CERT);
@@ -90,9 +104,10 @@ describe('readSignerCertificate', () => {
 });
 
 describe('validityProblem', () => {
-  it('is undefined inside the validity period', () => {
+  it('is undefined inside the validity period, both ends included', () => {
     expect(validityProblem(signer, NOW)).toBeUndefined();
     expect(validityProblem(signer, NOT_AFTER)).toBeUndefined();
+    expect(validityProblem(signer, signer.info.notBefore.getTime())).toBeUndefined();
   });
 
   it('names the expiry date once the certificate has expired', () => {
@@ -149,6 +164,34 @@ describe('cmsPolicyViolations', () => {
     ]);
   });
 
+  it('requires the issuer of an issuerAndSerialNumber sid, not only the serial', () => {
+    const otherIssuer = readSignerCertificate(withOtherIssuer(CERT)).info.issuer;
+    expect(otherIssuer).not.toEqual(signer.info.issuer);
+    // Our serial, but issued by another CA: a serial is unique only per issuer.
+    const sid = tlv(0x30, otherIssuer, tlv(0x02, signer.info.serialNumber));
+    expect(cmsPolicyViolations(cms({ signerInfos: [signerInfoWithSid(sid)] }), signer)).toEqual([
+      expect.stringMatching(/not by the configured certificate/),
+    ]);
+  });
+
+  it('ignores an embedded certificate with our serial from another issuer (not the signer)', () => {
+    const lookalike = withOtherIssuer(CERT);
+    expect(readSignerCertificate(lookalike).info.serialNumber).toEqual(signer.info.serialNumber);
+    expect(cmsPolicyViolations(cms({ certs: tlv(0xa0, CERT, lookalike) }), signer)).toEqual([]);
+  });
+
+  it('rejects an embedded certificate with the signer SKI that differs (subjectKeyIdentifier sid)', () => {
+    const ski = signer.info.subjectKeyIdentifier ?? Buffer.alloc(0);
+    const byKeyId = [signerInfoWithSid(tlv(0x80, ski))];
+    const lookalike = withOtherIssuer(CERT); // same SKI, other issuer: not caught by issuer+serial
+    expect(
+      cmsPolicyViolations(cms({ certs: tlv(0xa0, lookalike), signerInfos: byKeyId }), signer),
+    ).toEqual([expect.stringMatching(/embedded certificate.*differs/)]);
+    expect(
+      cmsPolicyViolations(cms({ certs: tlv(0xa0, CERT), signerInfos: byKeyId }), signer),
+    ).toEqual([]);
+  });
+
   it('matches a subjectKeyIdentifier signer against the certificate SKI', () => {
     const ski = signer.info.subjectKeyIdentifier ?? Buffer.alloc(0);
     const byKeyId = (id: Buffer) => cms({ signerInfos: [signerInfoWithSid(tlv(0x80, id))] });
@@ -183,6 +226,25 @@ describe('verifiedSignerViolations', () => {
 
   it('accepts one signer with the expected thumbprint in any case', () => {
     expect(verifiedSignerViolations({ valid: true, signers: [ok] }, signer)).toEqual([]);
+  });
+
+  it.each([
+    ['colons', colons(THUMBPRINT)],
+    ['spaces', spaced(THUMBPRINT)],
+    ['dashes', spaced(THUMBPRINT).replaceAll(' ', '-')],
+    ['surrounding whitespace', ` ${THUMBPRINT}\n`],
+  ])('accepts the expected thumbprint written with %s', (_name, thumbprint) => {
+    expect(
+      verifiedSignerViolations({ valid: true, signers: [{ ...ok, thumbprint }] }, signer),
+    ).toEqual([]);
+  });
+
+  it('does not strip hex digits or other characters that change the value', () => {
+    for (const thumbprint of [`${THUMBPRINT}0`, `0x${THUMBPRINT}`, `${THUMBPRINT}g`, '']) {
+      expect(
+        verifiedSignerViolations({ valid: true, signers: [{ ...ok, thumbprint }] }, signer),
+      ).toEqual([expect.stringMatching(/expected 0e84/)]);
+    }
   });
 
   it('fails closed when the verifier reports no thumbprint', () => {
@@ -223,7 +285,15 @@ describe('classifyVerifyFailure', () => {
 
   it('reports a valid math with a broken chain as CERTIFICATE_INVALID', () => {
     const result = classifyVerifyFailure(
-      failed([{ valid: false, mathValid: true, chainValid: false, certValid: true }]),
+      failed([
+        {
+          valid: false,
+          mathValid: true,
+          chainValid: false,
+          certValid: true,
+          thumbprint: colons(THUMBPRINT),
+        },
+      ]),
       signer,
       NOW,
     );
@@ -235,12 +305,46 @@ describe('classifyVerifyFailure', () => {
 
   it('says clearly when the signer certificate has expired', () => {
     const result = classifyVerifyFailure(
-      failed([{ valid: false, mathValid: true, chainValid: false, certValid: false }]),
+      failed([
+        {
+          valid: false,
+          mathValid: true,
+          chainValid: false,
+          certValid: false,
+          thumbprint: THUMBPRINT,
+        },
+      ]),
       signer,
       NOT_AFTER + 1,
     );
     expect(result.code).toBe('CERTIFICATE_INVALID');
     expect(result.message).toMatch(/expired on 2026-10-28T12:32:11.000Z/);
+  });
+
+  it('does not blame the configured certificate when the verifier names no signer', () => {
+    const result = classifyVerifyFailure(
+      failed([{ valid: false, mathValid: true, chainValid: false, certValid: true }]),
+      signer,
+      NOW,
+    );
+    expect(result.code).toBe('CERTIFICATE_INVALID');
+    expect(result.message).toMatch(/math is valid.*chain.*upstream says no/);
+    expect(result.message).toMatch(/signer not confirmed/);
+    expect(result.message).not.toContain(THUMBPRINT);
+    expect(result.message).not.toMatch(/valid until/);
+    expect(result.message).toMatch(/check the CA chain/);
+  });
+
+  it('without a named signer still mentions that the configured certificate has expired', () => {
+    const result = classifyVerifyFailure(
+      failed([{ valid: false, mathValid: true, chainValid: false, certValid: false }]),
+      signer,
+      NOT_AFTER + 1,
+    );
+    expect(result.code).toBe('CERTIFICATE_INVALID');
+    expect(result.message).toMatch(
+      /signer not confirmed.*configured certificate 0e84\w+ expired on 2026-10-28T12:32:11.000Z/,
+    );
   });
 
   it('reports a verifier-side signer with another thumbprint as a policy violation first', () => {

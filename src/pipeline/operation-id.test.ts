@@ -43,6 +43,27 @@ describe('operationIdFor', () => {
     expect(operationIdFor({ ...KEY, resend: 'b' })).not.toBe(a);
   });
 
+  it('keeps the golden values (a change here re-sends every document under a new key)', () => {
+    expect(operationIdFor(KEY)).toBe(
+      '370b4a95ffd2747fb06c74f911250928ae9840a695c35cd58fdc057d4a34848b',
+    );
+    expect(operationIdFor({ ...KEY, customDocumentId: 'inv-42' })).toBe(
+      'aa0725aa39f7d513be8cdaae0648292bdb2f3e65c19722eff0b6a01244d4664a',
+    );
+    expect(operationIdFor({ ...KEY, resend: 'r1' })).toBe(
+      '707f39ea5d54fad1b810560a3d58b2411121ada1cb9727eea796241ffe331ddb',
+    );
+    expect(operationIdFor({ ...KEY, customDocumentId: 'inv-42', resend: 'r1' })).toBe(
+      'b902b35d96a4fb6b098808caf0e79616f4f96fb84b5b16c5bfcafd957552e87a',
+    );
+  });
+
+  it('tells a present value from absent even when the bytes look alike', () => {
+    // Without the presence tag, absent (one 0x00 byte) and "\u0000" would hash the same.
+    expect(operationIdFor({ ...KEY, customDocumentId: '\u0000' })).not.toBe(operationIdFor(KEY));
+    expect(operationIdFor({ ...KEY, resend: '\u0000' })).not.toBe(operationIdFor(KEY));
+  });
+
   it('treats an undefined optional field as absent', () => {
     expect(operationIdFor({ ...KEY, customDocumentId: undefined, resend: undefined })).toBe(
       operationIdFor(KEY),

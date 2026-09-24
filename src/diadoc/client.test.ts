@@ -795,6 +795,32 @@ describe('DiadocClient transient failures', () => {
     expect((err as Error).cause).toMatchObject({ status: 502 });
   });
 
+  it('a PostMessage 500 may have been processed too', async () => {
+    const { client } = makeClient(
+      [0, 1].map(() => new Response('internal error', { status: 500 })),
+      { retry: { maxAttempts: 2 } },
+    );
+    const err = await client.postMessage(message, { operationId: 'op-1' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect((err as Error).cause).toMatchObject({ status: 500 });
+  });
+
+  it('refreshes the token at most once per call (401, 503, 401)', async () => {
+    const { client, calls, auth } = makeClient([
+      new Response('Invalid auth token', { status: 401 }),
+      new Response('unavailable', { status: 503 }),
+      new Response('Invalid auth token', { status: 401 }),
+    ]);
+    auth.tokens = ['OLD', 'NEW', 'NEWER'];
+    await expect(client.getMyOrganizations()).rejects.toMatchObject({ status: 401 });
+    expect(auth.invalidated).toEqual(['OLD']);
+    expect(calls.map((c) => headerOf(c, 'authorization'))).toEqual([
+      'Bearer OLD',
+      'Bearer NEW',
+      'Bearer NEW',
+    ]);
+  });
+
   it('a lost response followed by a plain rejection is still ambiguous', async () => {
     const { calls, fetchFn } = flaky([
       fetchFailed('ECONNRESET'),

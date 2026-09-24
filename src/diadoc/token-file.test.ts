@@ -2,10 +2,39 @@ import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DiadocConfigError } from './errors.js';
 import { lockRefreshTokenFile, writeRefreshTokenFile } from './token-file.js';
+
+// Records writes, fsyncs and renames of the token files (the real fs still does the work).
+const fsEvents = vi.hoisted(() => [] as string[]);
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  const base = (path: unknown): string => String(path).replace(/^.*\//, '');
+  return {
+    ...fs,
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      const name = base(args[0]);
+      const sync = handle.sync.bind(handle);
+      const writeFile = handle.writeFile.bind(handle);
+      handle.sync = () => {
+        fsEvents.push(`sync ${name}`);
+        return sync();
+      };
+      handle.writeFile = (...a: Parameters<typeof writeFile>) => {
+        fsEvents.push(`write ${name}`);
+        return writeFile(...a);
+      };
+      return handle;
+    },
+    rename: (from: string, to: string) => {
+      fsEvents.push(`rename ${base(from)} ${base(to)}`);
+      return fs.rename(from, to);
+    },
+  };
+});
 
 const isRoot = process.getuid?.() === 0;
 const dirs: string[] = [];
@@ -32,6 +61,13 @@ describe('writeRefreshTokenFile', () => {
     expect(await readFile(file, 'utf8')).toBe('new-token\n');
     expect(await mode(file)).toBe(0o600);
     await expect(stat(`${file}.tmp`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fsyncs the temp file after writing it and before the rename', async () => {
+    const { file } = await tokenFile();
+    fsEvents.length = 0;
+    await writeRefreshTokenFile(file, 'new-token', { syncDir: () => Promise.resolve() });
+    expect(fsEvents).toEqual(['write rt.tmp', 'sync rt.tmp', 'rename rt.tmp rt']);
   });
 
   it('does not reuse a stale world-readable temp file', async () => {
