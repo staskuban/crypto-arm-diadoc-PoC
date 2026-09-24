@@ -1,0 +1,446 @@
+import { describe, expect, expectTypeOf, it } from 'vitest';
+
+import { type AccessTokenProvider, RefreshTokenAuth } from './auth.js';
+import {
+  DIADOC_HOSTS,
+  DiadocClient,
+  type DiadocClientOptions,
+  findDocumentEntity,
+} from './client.js';
+import { DiadocConflictError, DiadocError, DiadocOperationPendingError } from './errors.js';
+import type { Message, MessageToPost, SignedContent } from './types.js';
+
+interface Call {
+  url: URL;
+  init: RequestInit;
+  body: string;
+}
+
+const urlOf = (input: string | URL | Request): string =>
+  typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+
+const bodyOf = (init?: RequestInit): string => (typeof init?.body === 'string' ? init.body : '');
+
+function fakeFetch(responses: Response[]): { calls: Call[]; fetchFn: typeof fetch } {
+  const calls: Call[] = [];
+  const fetchFn = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.push({ url: new URL(urlOf(input)), init: init ?? {}, body: bodyOf(init) });
+    const res = responses.shift();
+    return res ? Promise.resolve(res) : Promise.reject(new Error('unexpected request'));
+  };
+  return { calls, fetchFn };
+}
+
+const jsonResponse = (
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
+  });
+
+class FakeAuth implements AccessTokenProvider {
+  tokens: string[];
+  constructor(...tokens: string[]) {
+    this.tokens = tokens;
+  }
+  getAccessToken(): Promise<string> {
+    return Promise.resolve(this.tokens[0] ?? 'none');
+  }
+  invalidated: string[] = [];
+  invalidate(token: string): void {
+    this.invalidated.push(token);
+    if (this.tokens[0] === token) this.tokens.shift();
+  }
+}
+
+function makeClient(
+  responses: Response[],
+  overrides: Partial<DiadocClientOptions> = {},
+): { client: DiadocClient; calls: Call[]; slept: number[]; auth: FakeAuth } {
+  const { calls, fetchFn } = fakeFetch(responses);
+  const slept: number[] = [];
+  const auth = new FakeAuth('AT');
+  const client = new DiadocClient({
+    environment: 'staging',
+    auth,
+    fetch: fetchFn,
+    sleep: (ms) => {
+      slept.push(ms);
+      return Promise.resolve();
+    },
+    ...overrides,
+  });
+  return { client, calls, slept, auth };
+}
+
+const headerOf = (call: Call | undefined, name: string): string | null =>
+  new Headers(call?.init.headers).get(name);
+
+describe('DiadocClient hosts', () => {
+  it('knows prod and staging hosts', () => {
+    expect(DIADOC_HOSTS).toEqual({
+      prod: 'https://diadoc-api.kontur.ru',
+      staging: 'https://diadoc-api-staging.kontur.ru',
+    });
+  });
+
+  it.each([
+    ['prod', 'diadoc-api.kontur.ru'],
+    ['staging', 'diadoc-api-staging.kontur.ru'],
+  ] as const)('%s environment → %s', async (environment, host) => {
+    const { client, calls } = makeClient([jsonResponse({ Organizations: [] })], { environment });
+    await client.getMyOrganizations();
+    expect(calls[0]?.url.host).toBe(host);
+  });
+
+  it('accepts an explicit baseUrl (trailing slash tolerated)', async () => {
+    const { client, calls } = makeClient([jsonResponse({ Organizations: [] })], {
+      baseUrl: 'http://localhost:8080/diadoc/',
+    });
+    await client.getMyOrganizations();
+    expect(calls[0]?.url.href).toBe(
+      'http://localhost:8080/diadoc/GetMyOrganizations?autoRegister=false',
+    );
+  });
+});
+
+describe('DiadocClient requests', () => {
+  it('GetMyOrganizations: GET, Bearer token, JSON accept, autoRegister=false', async () => {
+    const orgs = { Organizations: [{ Inn: '7700000016', Boxes: [{ BoxId: 'x@diadoc.ru' }] }] };
+    const { client, calls } = makeClient([jsonResponse(orgs)]);
+
+    expect(await client.getMyOrganizations()).toEqual(orgs);
+
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.url.href).toBe(
+      'https://diadoc-api-staging.kontur.ru/GetMyOrganizations?autoRegister=false',
+    );
+    expect(headerOf(calls[0], 'authorization')).toBe('Bearer AT');
+    expect(headerOf(calls[0], 'accept')).toMatch(/application\/json/);
+  });
+
+  it('GetOrganization by boxId', async () => {
+    const { client, calls } = makeClient([jsonResponse({ Inn: '1', FnsParticipantId: '2BM-1' })]);
+    expect(await client.getOrganization('box-guid')).toMatchObject({ FnsParticipantId: '2BM-1' });
+    expect(calls[0]?.url.pathname).toBe('/GetOrganization');
+    expect(calls[0]?.url.searchParams.get('boxId')).toBe('box-guid');
+  });
+
+  it('V3/GetDocumentTypes by boxId', async () => {
+    const types = { DocumentTypes: [{ Name: 'UniversalTransferDocument', Functions: [] }] };
+    const { client, calls } = makeClient([jsonResponse(types)]);
+    expect(await client.getDocumentTypes('box-guid')).toEqual(types);
+    expect(calls[0]?.url.pathname).toBe('/V3/GetDocumentTypes');
+    expect(calls[0]?.url.searchParams.get('boxId')).toBe('box-guid');
+  });
+
+  it('CanPostMessage posts the prototype as UTF-8 JSON', async () => {
+    const prototype = {
+      FromBoxId: 'a',
+      ToBoxId: 'b',
+      DocumentPrototypes: [
+        {
+          TypeNamedId: 'UniversalTransferDocument',
+          Function: 'СЧФДОП',
+          Version: 'utd970_05_03_01',
+          CustomDocumentId: 'doc-1',
+        },
+      ],
+    };
+    const { client, calls } = makeClient([jsonResponse({ Errors: [] })]);
+
+    expect(await client.canPostMessage(prototype)).toEqual({ Errors: [] });
+
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(calls[0]?.url.pathname).toBe('/CanPostMessage');
+    expect(headerOf(calls[0], 'content-type')).toBe('application/json; charset=utf-8');
+    expect(JSON.parse(calls[0]?.body ?? '')).toEqual(prototype);
+  });
+
+  it('V3/GetDocument without entity content; getDocflowStatus extracts DocflowStatus', async () => {
+    const docflowStatus = { PrimaryStatus: { Severity: 'Success', StatusText: 'Подписан' } };
+    const { client, calls } = makeClient([
+      jsonResponse({ MessageId: 'm', EntityId: 'e', DocflowStatus: docflowStatus }),
+      jsonResponse({ MessageId: 'm', EntityId: 'e', DocflowStatus: docflowStatus }),
+    ]);
+    const ids = { boxId: 'box', messageId: 'm', entityId: 'e' };
+
+    expect(await client.getDocument(ids)).toMatchObject({ DocflowStatus: docflowStatus });
+    expect(await client.getDocflowStatus(ids)).toEqual(docflowStatus);
+
+    expect(calls[0]?.url.pathname).toBe('/V3/GetDocument');
+    expect(Object.fromEntries(calls[0]?.url.searchParams ?? [])).toEqual({
+      boxId: 'box',
+      messageId: 'm',
+      entityId: 'e',
+      injectEntityContent: 'false',
+    });
+  });
+
+  it('getDocflowStatus fails when the document has no DocflowStatus', async () => {
+    const { client } = makeClient([jsonResponse({ MessageId: 'm' })]);
+    await expect(
+      client.getDocflowStatus({ boxId: 'b', messageId: 'm', entityId: 'e' }),
+    ).rejects.toThrow(/DocflowStatus/);
+  });
+});
+
+describe('DiadocClient.postMessage', () => {
+  const content = Buffer.from([0x3c, 0x3f, 0xc0, 0xff, 0x00]); // windows-1251 bytes stay bytes
+  const signature = Buffer.from([0x30, 0x82, 0x01, 0x02]);
+  const message: MessageToPost = {
+    FromBoxId: 'from',
+    ToBoxId: 'to',
+    DocumentAttachments: [
+      {
+        TypeNamedId: 'UniversalTransferDocument',
+        Function: 'СЧФДОП',
+        Version: 'utd970_05_03_01',
+        CustomDocumentId: 'doc-1',
+        SignedContent: { Content: content, Signature: signature },
+      },
+    ],
+  };
+  const posted: Message = {
+    MessageId: 'msg',
+    Entities: [
+      { EntityType: 'Attachment', EntityId: 'sig', ParentEntityId: 'doc' },
+      { EntityType: 'Attachment', EntityId: 'doc', ParentEntityId: '' },
+    ],
+  };
+
+  it('sends operationId and serializes Buffers as base64', async () => {
+    const { client, calls } = makeClient([jsonResponse(posted)]);
+
+    expect(await client.postMessage(message, { operationId: 'op-1' })).toEqual(posted);
+
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(calls[0]?.url.pathname).toBe('/V3/PostMessage');
+    expect(calls[0]?.url.searchParams.get('operationId')).toBe('op-1');
+    expect(headerOf(calls[0], 'content-type')).toBe('application/json; charset=utf-8');
+    expect(JSON.parse(calls[0]?.body ?? '')).toEqual({
+      FromBoxId: 'from',
+      ToBoxId: 'to',
+      DocumentAttachments: [
+        {
+          TypeNamedId: 'UniversalTransferDocument',
+          Function: 'СЧФДОП',
+          Version: 'utd970_05_03_01',
+          CustomDocumentId: 'doc-1',
+          SignedContent: {
+            Content: content.toString('base64'),
+            Signature: signature.toString('base64'),
+          },
+        },
+      ],
+    });
+  });
+
+  it('serializes NameOnShelf and SignWithTestSignature without binary fields', async () => {
+    const { client, calls } = makeClient([jsonResponse(posted)]);
+    const attachment = message.DocumentAttachments[0];
+    if (!attachment) throw new Error('fixture');
+    await client.postMessage(
+      {
+        ...message,
+        DocumentAttachments: [
+          { ...attachment, SignedContent: { NameOnShelf: 'shelf-1', SignWithTestSignature: true } },
+        ],
+      },
+      { operationId: 'op' },
+    );
+    const body = JSON.parse(calls[0]?.body ?? '') as MessageToPostWire;
+    expect(body.DocumentAttachments[0]?.SignedContent).toEqual({
+      NameOnShelf: 'shelf-1',
+      SignWithTestSignature: true,
+    });
+  });
+
+  it('SignedContent requires a body and a signature at the type level', () => {
+    expectTypeOf({ Content: content, Signature: signature }).toExtend<SignedContent>();
+    expectTypeOf({
+      NameOnShelf: 's',
+      SignWithTestSignature: true as const,
+    }).toExtend<SignedContent>();
+    expectTypeOf({ Content: content }).not.toExtend<SignedContent>();
+    expectTypeOf({ Signature: signature }).not.toExtend<SignedContent>();
+    expectTypeOf({
+      Content: content,
+      NameOnShelf: 's',
+      Signature: signature,
+    }).not.toExtend<SignedContent>();
+  });
+
+  it('repeats the identical request on 204 + Retry-After', async () => {
+    const { client, calls, slept } = makeClient([
+      new Response(null, { status: 204, headers: { 'retry-after': '2' } }),
+      new Response(null, { status: 204 }),
+      jsonResponse(posted),
+    ]);
+
+    expect(await client.postMessage(message, { operationId: 'op-1' })).toEqual(posted);
+
+    expect(calls).toHaveLength(3);
+    expect(slept).toEqual([2000, 1000]);
+    expect(new Set(calls.map((c) => c.url.href)).size).toBe(1);
+    expect(new Set(calls.map((c) => c.body)).size).toBe(1);
+  });
+
+  it('gives up with DiadocOperationPendingError after maxAttempts', async () => {
+    const { client, calls } = makeClient([
+      new Response(null, { status: 204 }),
+      new Response(null, { status: 204 }),
+    ]);
+    const err = await client
+      .postMessage(message, { operationId: 'op-1', maxAttempts: 2 })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocOperationPendingError);
+    expect(err).toMatchObject({ operationId: 'op-1' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('maps 409 to DiadocConflictError with the response text', async () => {
+    const { client } = makeClient([
+      new Response('Message with the same operationId already exists', { status: 409 }),
+    ]);
+    const err = await client.postMessage(message, { operationId: 'op-1' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocConflictError);
+    expect(err).toBeInstanceOf(DiadocError);
+    expect(err).toMatchObject({
+      status: 409,
+      body: 'Message with the same operationId already exists',
+    });
+  });
+
+  it('rejects an empty operationId', async () => {
+    const { client, calls } = makeClient([]);
+    await expect(client.postMessage(message, { operationId: '' })).rejects.toThrow(/operationId/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'rejects maxAttempts=%s without sending',
+    async (maxAttempts) => {
+      const { client, calls } = makeClient([]);
+      await expect(client.postMessage(message, { operationId: 'op', maxAttempts })).rejects.toThrow(
+        /maxAttempts/,
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('repeats the identical request after a 401', async () => {
+    const { client, calls, auth } = makeClient([
+      new Response('Invalid auth token', { status: 401 }),
+      jsonResponse(posted),
+    ]);
+    auth.tokens = ['OLD', 'NEW'];
+    await client.postMessage(message, { operationId: 'op-1' });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.url.href).toBe(calls[0]?.url.href);
+    expect(calls[1]?.body).toBe(calls[0]?.body);
+  });
+
+  it('maps 204 followed by 409 to DiadocConflictError', async () => {
+    const { client } = makeClient([
+      new Response(null, { status: 204 }),
+      new Response('duplicate', { status: 409 }),
+    ]);
+    await expect(client.postMessage(message, { operationId: 'op-1' })).rejects.toBeInstanceOf(
+      DiadocConflictError,
+    );
+  });
+
+  it('findDocumentEntity picks the parentless Attachment', () => {
+    expect(findDocumentEntity(posted)?.EntityId).toBe('doc');
+    expect(findDocumentEntity({ MessageId: 'm' })).toBeUndefined();
+  });
+});
+
+describe('DiadocClient errors and auth', () => {
+  it('throws DiadocError with status, method, path and text body', async () => {
+    const { client } = makeClient([new Response('Box not found', { status: 403 })]);
+    const err = await client.getDocumentTypes('box').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocError);
+    expect(err).toMatchObject({
+      status: 403,
+      method: 'GET',
+      path: '/V3/GetDocumentTypes',
+      body: 'Box not found',
+    });
+  });
+
+  it('on 401 invalidates the token and retries once with a fresh one', async () => {
+    const { client, calls, auth } = makeClient([
+      new Response('Invalid auth token', { status: 401 }),
+      jsonResponse({ Organizations: [] }),
+    ]);
+    auth.tokens = ['OLD', 'NEW'];
+
+    await client.getMyOrganizations();
+
+    expect(auth.invalidated).toEqual(['OLD']);
+    expect(calls.map((c) => headerOf(c, 'authorization'))).toEqual(['Bearer OLD', 'Bearer NEW']);
+  });
+
+  it('passes a timeout signal to fetch', async () => {
+    const { client, calls } = makeClient([jsonResponse({ Organizations: [] })]);
+    await client.getMyOrganizations();
+    expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('turns a non-JSON success body into DiadocError', async () => {
+    const { client } = makeClient([new Response('<html>proxy</html>', { status: 200 })]);
+    const err = await client.getMyOrganizations().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocError);
+    expect(err).toMatchObject({ status: 200, path: '/GetMyOrganizations' });
+  });
+
+  it('with RefreshTokenAuth, concurrent 401s cause a single token refresh', async () => {
+    const token = (t: string): Response =>
+      jsonResponse({ access_token: t, expires_in: 3600, refresh_token: 'RT' });
+    const unauthorized = (): Response => new Response('Invalid auth token', { status: 401 });
+    const ok = (): Response => jsonResponse({ Organizations: [] });
+    // order of fetch calls: token, 2 API (401), 1 token refresh, 2 API retries (ok)
+    const { calls, fetchFn } = fakeFetch([
+      token('T1'),
+      unauthorized(),
+      unauthorized(),
+      token('T2'),
+      ok(),
+      ok(),
+    ]);
+    const auth = new RefreshTokenAuth({
+      clientId: 'c',
+      clientSecret: 's',
+      refreshToken: 'RT',
+      fetch: fetchFn,
+    });
+    const client = new DiadocClient({ environment: 'staging', auth, fetch: fetchFn });
+
+    await Promise.all([client.getMyOrganizations(), client.getMyOrganizations()]);
+
+    const tokenCalls = calls.filter((c) => c.url.host === 'identity.kontur.ru');
+    expect(tokenCalls).toHaveLength(2);
+    expect(calls.slice(-2).map((c) => headerOf(c, 'authorization'))).toEqual([
+      'Bearer T2',
+      'Bearer T2',
+    ]);
+  });
+
+  it('does not retry a second 401', async () => {
+    const { client, calls } = makeClient([
+      new Response('Invalid auth token', { status: 401 }),
+      new Response('Invalid auth token', { status: 401 }),
+    ]);
+    await expect(client.getMyOrganizations()).rejects.toMatchObject({ status: 401 });
+    expect(calls).toHaveLength(2);
+  });
+});
+
+interface MessageToPostWire {
+  DocumentAttachments: { SignedContent: Record<string, unknown> }[];
+}
