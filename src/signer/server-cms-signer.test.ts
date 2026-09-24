@@ -9,10 +9,15 @@ import {
   SignerHttpError,
   SignerKeyNotFoundError,
   SignerNetworkError,
+  SignerPayloadTooLargeError,
   SignerResponseError,
   SignerTimeoutError,
 } from './errors.js';
-import { ServerCmsSigner, type ServerCmsSignerOptions } from './server-cms-signer.js';
+import {
+  DEFAULT_MAX_REQUEST_BYTES,
+  ServerCmsSigner,
+  type ServerCmsSignerOptions,
+} from './server-cms-signer.js';
 
 const certDer = Buffer.from([0x30, 0x08, 0x30, 0x03, 0x02, 0x01, 0x02, 0x05, 0x01, 0x00]);
 const pfxDer = Buffer.from([0x30, 0x05, 0x02, 0x01, 0x03, 0x30, 0x00]);
@@ -492,5 +497,115 @@ describe('ServerCmsSigner.verify', () => {
     await expect(signer.verify(Buffer.alloc(0), signature)).rejects.toThrow(SignerError);
     await expect(signer.verify(data, Buffer.alloc(0))).rejects.toThrow(SignerError);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('ServerCmsSigner request size limit', () => {
+  const ok = () => Promise.resolve(json({ cms: cmsDer.toString('base64') }));
+  // Exact JSON body of sign(data) with certDer, as sent on the wire.
+  const signBodyBytes = (bytes: Buffer) =>
+    Buffer.byteLength(
+      JSON.stringify({
+        cert: certDer.toString('base64'),
+        data: bytes.toString('base64'),
+        detached: true,
+        cadesStandard: 'CAdES-BES',
+      }),
+    );
+
+  it('defaults to the КриптоАРМ Server JSON_LIMIT of 50mb (52 428 800 B, measured on the stand)', () => {
+    expect(DEFAULT_MAX_REQUEST_BYTES).toBe(52_428_800);
+  });
+
+  it('sends a body of exactly maxRequestBytes and refuses one byte more without calling the server', async () => {
+    const limit = signBodyBytes(data);
+    const { signer: atLimit, fetchMock } = setup(ok, { maxRequestBytes: limit });
+    await atLimit.sign(data);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { init } = lastRequest(fetchMock);
+    expect(Buffer.byteLength(init.body as string)).toBe(limit);
+
+    const { signer: below, fetchMock: notCalled } = setup(ok, { maxRequestBytes: limit - 1 });
+    const error = await below.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toBeInstanceOf(SignerError);
+    expect(error).toMatchObject({
+      operation: 'sign',
+      requestBytes: limit,
+      limitBytes: limit - 1,
+      status: undefined,
+    });
+    expect((error as Error).message).toMatch(/sign: .*request body.*too large/i);
+    expect((error as Error).message).toContain(String(limit - 1));
+    expect(notCalled).not.toHaveBeenCalled();
+  });
+
+  it('refuses data above the default limit before encoding or sending it', async () => {
+    const { signer, fetchMock } = setup(ok);
+    // base64 alone: 4 * 13 107 201 = 52 428 804 B > 52 428 800 B.
+    const big = Buffer.alloc(3 * 13_107_201);
+    await expect(signer.sign(big)).rejects.toMatchObject({
+      name: 'SignerPayloadTooLargeError',
+      limitBytes: DEFAULT_MAX_REQUEST_BYTES,
+    });
+    await expect(signer.verify(big, cmsDer)).rejects.toMatchObject({
+      name: 'SignerPayloadTooLargeError',
+      operation: 'verify',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('counts the signature in the verify body', async () => {
+    const body = Buffer.byteLength(
+      JSON.stringify({ cms: cmsDer.toString('base64'), data: data.toString('base64') }),
+    );
+    const { signer, fetchMock } = setup(json({ isValidSign: false }), {
+      maxRequestBytes: body - 1,
+    });
+    await expect(signer.verify(data, cmsDer)).rejects.toMatchObject({
+      name: 'SignerPayloadTooLargeError',
+      requestBytes: body,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['400 «request entity too large» (what the stand answers)', 400],
+    ['413', 413],
+  ])('maps an upstream %s to SignerPayloadTooLargeError', async (_label, status) => {
+    const { signer } = setup(
+      json(
+        { statusCode: status, message: 'request entity too large' },
+        { status, headers: { 'X-Request-Id': 'req-7' } },
+      ),
+    );
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toMatchObject({
+      operation: 'sign',
+      status,
+      requestBytes: signBodyBytes(data),
+      limitBytes: DEFAULT_MAX_REQUEST_BYTES,
+    });
+    expect(error).toMatchObject({
+      upstreamMessage: 'request entity too large',
+      requestId: 'req-7',
+    });
+    expect((error as Error).message).toContain('JSON_LIMIT');
+    expect((error as Error).message).toContain('request id req-7');
+    expect((error as Error).message).toMatch(/proxy/);
+  });
+
+  it('maps a bare 413 without a JSON body too', async () => {
+    const { signer } = setup(new Response('Payload Too Large', { status: 413 }));
+    await expect(signer.verify(data, cmsDer)).rejects.toMatchObject({
+      name: 'SignerPayloadTooLargeError',
+      operation: 'verify',
+      status: 413,
+    });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects maxRequestBytes %s', (maxRequestBytes) => {
+    expect(() => setup(ok, { maxRequestBytes })).toThrow(SignerConfigError);
   });
 });

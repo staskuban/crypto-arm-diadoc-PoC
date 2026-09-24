@@ -6,6 +6,7 @@ import {
   SignerHttpError,
   SignerKeyNotFoundError,
   SignerNetworkError,
+  SignerPayloadTooLargeError,
   SignerResponseError,
   SignerTimeoutError,
   type SignerOperation,
@@ -15,7 +16,14 @@ import type { SignResult, Signer, SignerCallOptions, SignerInfo, VerifyResult } 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 /** Timers overflow above 2^31-1 ms and would fire immediately. */
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+/**
+ * КриптоАРМ Server `JSON_LIMIT` default `50mb` = 52 428 800 B of request body, exact on the stand
+ * (2026-09-24: 52 428 800 B parsed, 52 428 801 B → 400 «request entity too large»).
+ */
+export const DEFAULT_MAX_REQUEST_BYTES = 52_428_800;
 const MAX_ERROR_TEXT = 500;
+/** body-parser text; the stand sends it with HTTP 400, not 413 (docs/plan.md D30). */
+const TOO_LARGE = /request entity too large/i;
 /** OID 1.2.840.113549.1.7.2 (pkcs7-signedData), DER encoded with tag and length. */
 const SIGNED_DATA_OID = Buffer.from('06092a864886f70d010702', 'hex');
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -37,6 +45,12 @@ export interface ServerCmsSignerOptions {
   apiKey?: string;
   /** Per-request timeout; default 120 s (the x86_64 image is slow under emulation). */
   timeoutMs?: number;
+  /**
+   * Largest JSON request body sent, in bytes; default {@link DEFAULT_MAX_REQUEST_BYTES}. Keep it
+   * equal to the server `JSON_LIMIT`. Larger requests fail with `SignerPayloadTooLargeError`
+   * before encoding. The verify body (data + signature) is the larger of the two.
+   */
+  maxRequestBytes?: number;
   /** Injected for tests; defaults to the global `fetch`. */
   fetch?: typeof fetch;
 }
@@ -49,6 +63,7 @@ export class ServerCmsSigner implements Signer {
   readonly #certificate: string;
   readonly #apiKey: string | undefined;
   readonly #timeoutMs: number;
+  readonly #maxRequestBytes: number;
   readonly #fetch: typeof fetch;
 
   constructor(options: ServerCmsSignerOptions) {
@@ -69,6 +84,12 @@ export class ServerCmsSigner implements Signer {
         `timeoutMs must be an integer in 1..${String(MAX_TIMEOUT_MS)}, got ${String(this.#timeoutMs)}`,
       );
     }
+    this.#maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+    if (!Number.isSafeInteger(this.#maxRequestBytes) || this.#maxRequestBytes <= 0) {
+      throw new SignerConfigError(
+        `maxRequestBytes must be a positive integer, got ${String(this.#maxRequestBytes)}`,
+      );
+    }
     this.#fetch = options.fetch ?? globalThis.fetch;
   }
 
@@ -79,7 +100,7 @@ export class ServerCmsSigner implements Signer {
       'cms/sign',
       {
         cert: this.#certificate,
-        data: data.toString('base64'),
+        data,
         detached: true,
         cadesStandard: 'CAdES-BES',
       },
@@ -117,12 +138,7 @@ export class ServerCmsSigner implements Signer {
   ): Promise<VerifyResult> {
     requireNonEmpty('verify', data, 'data');
     requireNonEmpty('verify', signature, 'signature');
-    const body = await this.#post(
-      'verify',
-      'cms/verify',
-      { cms: signature.toString('base64'), data: data.toString('base64') },
-      options.signal,
-    );
+    const body = await this.#post('verify', 'cms/verify', { cms: signature, data }, options.signal);
     if (!isRecord(body) || typeof body.isValidSign !== 'boolean') {
       throw new SignerResponseError('verify', 'missing boolean "isValidSign"');
     }
@@ -139,12 +155,33 @@ export class ServerCmsSigner implements Signer {
     return { valid, signers, reason: reasons.join('; ') || 'signature is not valid' };
   }
 
+  /** Posts `payload` as JSON, `Buffer` values as Base64 strings, within `maxRequestBytes`. */
   async #post(
     operation: SignerOperation,
     path: string,
-    payload: object,
+    payload: Record<string, string | boolean | Buffer>,
     callerSignal: AbortSignal | undefined,
   ): Promise<unknown> {
+    // Size the body before encoding: a Base64 string of a few hundred MB would not even fit
+    // into a V8 string. Base64 needs no JSON escaping, so the sum is exact.
+    const encode = (base64: (value: Buffer) => string) =>
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(payload).map(([key, value]) => [
+            key,
+            Buffer.isBuffer(value) ? base64(value) : value,
+          ]),
+        ),
+      );
+    let requestBytes = Buffer.byteLength(encode(() => ''));
+    for (const value of Object.values(payload)) {
+      if (Buffer.isBuffer(value)) requestBytes += 4 * Math.ceil(value.length / 3);
+    }
+    if (requestBytes > this.#maxRequestBytes) {
+      throw new SignerPayloadTooLargeError(operation, requestBytes, this.#maxRequestBytes);
+    }
+    const body = encode((value) => value.toString('base64'));
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json',
@@ -159,7 +196,7 @@ export class ServerCmsSigner implements Signer {
       response = await this.#fetch(new URL(path, this.#baseUrl), {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
+        body,
         signal,
         // Never follow redirects: X-API-Key would be forwarded to the new host and POST turned into GET.
         redirect: 'error',
@@ -176,6 +213,13 @@ export class ServerCmsSigner implements Signer {
     if (!response.ok) {
       const message = upstreamMessage(text);
       const requestId = response.headers.get('x-request-id') ?? undefined;
+      if (response.status === 413 || (response.status === 400 && TOO_LARGE.test(message))) {
+        throw new SignerPayloadTooLargeError(operation, requestBytes, this.#maxRequestBytes, {
+          status: response.status,
+          upstreamMessage: message,
+          requestId,
+        });
+      }
       const HttpError =
         response.status === 400 && KEY_NOT_FOUND.test(message)
           ? SignerKeyNotFoundError

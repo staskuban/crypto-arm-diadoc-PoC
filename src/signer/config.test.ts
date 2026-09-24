@@ -17,6 +17,7 @@ describe('loadServerCmsSignerOptions', () => {
         CRYPTOARM_SERVER_API_KEY: 'key',
         SIGNER_CERT_PATH: '/certs/signer.cer',
         CRYPTOARM_SERVER_TIMEOUT_MS: '5000',
+        CRYPTOARM_SERVER_MAX_REQUEST_BYTES: '104857600',
       },
       readFile,
     );
@@ -25,6 +26,7 @@ describe('loadServerCmsSignerOptions', () => {
       apiKey: 'key',
       certificate: certDer,
       timeoutMs: 5000,
+      maxRequestBytes: 104_857_600,
     });
   });
 
@@ -58,6 +60,22 @@ describe('loadServerCmsSignerOptions', () => {
         CRYPTOARM_SERVER_TIMEOUT_MS: '9999999999',
       },
       /CRYPTOARM_SERVER_TIMEOUT_MS/,
+    ],
+    [
+      {
+        CRYPTOARM_SERVER_URL: 'http://s',
+        SIGNER_CERT_PATH: '/certs/signer.cer',
+        CRYPTOARM_SERVER_MAX_REQUEST_BYTES: '50mb',
+      },
+      /CRYPTOARM_SERVER_MAX_REQUEST_BYTES/,
+    ],
+    [
+      {
+        CRYPTOARM_SERVER_URL: 'http://s',
+        SIGNER_CERT_PATH: '/certs/signer.cer',
+        CRYPTOARM_SERVER_MAX_REQUEST_BYTES: '0',
+      },
+      /CRYPTOARM_SERVER_MAX_REQUEST_BYTES/,
     ],
   ])('rejects incomplete env %#', async (env, message) => {
     await expect(loadServerCmsSignerOptions(env, readFile)).rejects.toThrow(message);

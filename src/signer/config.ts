@@ -7,8 +7,8 @@ export type SignerEnv = Record<string, string | undefined>;
 
 /**
  * Builds `ServerCmsSigner` options from env:
- * `CRYPTOARM_SERVER_URL`, `SIGNER_CERT_PATH` (public .cer), optional `CRYPTOARM_SERVER_API_KEY`
- * and `CRYPTOARM_SERVER_TIMEOUT_MS`.
+ * `CRYPTOARM_SERVER_URL`, `SIGNER_CERT_PATH` (public .cer), optional `CRYPTOARM_SERVER_API_KEY`,
+ * `CRYPTOARM_SERVER_TIMEOUT_MS` and `CRYPTOARM_SERVER_MAX_REQUEST_BYTES` (bytes, = server `JSON_LIMIT`).
  */
 export async function loadServerCmsSignerOptions(
   env: SignerEnv = process.env,
@@ -41,6 +41,16 @@ export async function loadServerCmsSignerOptions(
       );
     }
     options.timeoutMs = timeoutMs;
+  }
+  const maxRequest = env.CRYPTOARM_SERVER_MAX_REQUEST_BYTES;
+  if (maxRequest) {
+    const maxRequestBytes = Number(maxRequest);
+    if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes <= 0) {
+      throw new SignerConfigError(
+        `CRYPTOARM_SERVER_MAX_REQUEST_BYTES must be a positive integer (bytes), got ${JSON.stringify(maxRequest)}`,
+      );
+    }
+    options.maxRequestBytes = maxRequestBytes;
   }
   return options;
 }
