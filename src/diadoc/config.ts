@@ -23,7 +23,8 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
  * Reads Diadoc settings from env: `DIADOC_API_URL` (required, no prod default so a test run never
  * hits production by accident), `DIADOC_CLIENT_ID`, `DIADOC_CLIENT_SECRET`, and
  * `DIADOC_REFRESH_TOKEN_FILE` (preferred: rotated tokens can be persisted) or `DIADOC_REFRESH_TOKEN`.
- * Optional: `DIADOC_TOKEN_URL`, `DIADOC_TIMEOUT_MS`.
+ * Optional: `DIADOC_TOKEN_URL`, `DIADOC_TIMEOUT_MS` (per Diadoc API request; the token endpoint keeps
+ * its own 30 s, see RefreshTokenAuthOptions.timeoutMs).
  */
 export async function loadDiadocEnv(
   env: DiadocEnv = process.env,
@@ -86,13 +87,20 @@ function required(env: DiadocEnv, name: string): string {
   return value;
 }
 
-/** Bearer tokens and client secrets must not travel over plain HTTP, except to a local stub. */
+/**
+ * Bearer tokens and client secrets must not travel over plain HTTP, except to a local stub; no
+ * credentials in the URL. Errors name the variable, never its value.
+ */
 function checkUrl(name: string, value: string): string {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
     throw new DiadocConfigError(`${name} is not a URL`);
+  }
+  // fetch refuses such a URL and its TypeError would print the password; nothing here needs them.
+  if (url.username !== '' || url.password !== '') {
+    throw new DiadocConfigError(`${name} must not contain credentials (userinfo before @)`);
   }
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOCAL_HOSTS.has(url.hostname))) {
     throw new DiadocConfigError(

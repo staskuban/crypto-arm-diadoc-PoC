@@ -3,7 +3,7 @@
 // is issued in the integrator cabinet, so the refresh request carries no scope.
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { DiadocAuthError } from './errors.js';
+import { DiadocAuthError, DiadocTokenDeadlineError } from './errors.js';
 import {
   DEFAULT_RETRY_POLICY,
   fetchWithRetry,
@@ -19,6 +19,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * token-file write) on every API call.
  */
 const DEFAULT_LIFETIME_S = 300;
+/** A larger `expires_in` (up to Infinity for 1e306) is cut to this; a 401 still drops the token. */
+const MAX_LIFETIME_S = 86_400;
 const MAX_BODY_IN_MESSAGE = 300;
 
 /** Bounds for a token refresh made on behalf of one API call. */
@@ -59,9 +61,9 @@ export interface RefreshTokenAuthOptions {
    */
   onRefreshTokenRotated?: (refreshToken: string) => void | Promise<void>;
   tokenUrl?: string;
-  /** Refresh this long before `expires_in` runs out. Default 60 s. */
+  /** Refresh this long before `expires_in` runs out, at most half of it. Default 60 s. */
   expiryMarginMs?: number;
-  /** Per token request. Default 30 s. */
+  /** Per token request. Default 30 s. The CLI keeps the default (not `DIADOC_TIMEOUT_MS`, D-6). */
   timeoutMs?: number;
   /**
    * Repeats of the identical token request on 429 (Retry-After), 408, 5xx, network errors and
@@ -85,6 +87,8 @@ export class RefreshTokenAuth implements AccessTokenProvider {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly tokenUrl: string;
+  /** For messages: no userinfo, query or fragment (they may hold gateway keys). */
+  private readonly tokenUrlText: string;
   private readonly expiryMarginMs: number;
   private readonly timeoutMs: number;
   private readonly onRefreshTokenRotated: RefreshTokenAuthOptions['onRefreshTokenRotated'];
@@ -102,6 +106,7 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     this.clientSecret = o.clientSecret;
     this.refreshToken = o.refreshToken;
     this.tokenUrl = o.tokenUrl ?? DEFAULT_TOKEN_URL;
+    this.tokenUrlText = printableUrl(this.tokenUrl);
     this.expiryMarginMs = o.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
     this.timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.onRefreshTokenRotated = o.onRefreshTokenRotated;
@@ -130,6 +135,21 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     if (this.cached?.accessToken === accessToken) this.cached = undefined;
   }
 
+  /** A proxy may echo the request form in an error page: never print the secrets it carries. */
+  private redact(text: string): string {
+    let out = text;
+    for (const secret of [this.clientSecret, this.refreshToken]) {
+      if (secret === '') continue;
+      const forms = new Set([
+        secret,
+        encodeURIComponent(secret),
+        new URLSearchParams({ s: secret }).toString().slice(2),
+      ]);
+      for (const form of forms) out = out.split(form).join('***');
+    }
+    return out;
+  }
+
   private async refresh(o: TokenRequestOptions): Promise<string> {
     const { signal, deadline } = o;
     signal?.throwIfAborted();
@@ -137,10 +157,9 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     // The last moment a request with the full timeout can start and still end by the deadline.
     const lastStart = deadline === undefined ? undefined : deadline - this.timeoutMs;
     if (lastStart !== undefined && startedAt > lastStart) {
-      throw new DiadocAuthError(
-        `Token endpoint ${this.tokenUrl} not asked: a token request (up to ` +
+      throw new DiadocTokenDeadlineError(
+        `Token endpoint ${this.tokenUrlText} not asked: a token request (up to ` +
           `${String(this.timeoutMs / 1000)} s) would not end before the deadline of the API call`,
-        0,
       );
     }
     const body = new URLSearchParams({
@@ -175,7 +194,7 @@ export class RefreshTokenAuth implements AccessTokenProvider {
       // A DiadocAuthError, so callers that retry on network errors do not repeat the whole loop.
       const reason = error instanceof Error && error.cause instanceof Error ? error.cause : error;
       throw new DiadocAuthError(
-        `Token endpoint ${this.tokenUrl} unreachable: ${reason instanceof Error ? reason.message : String(reason)}`,
+        `Token endpoint ${this.tokenUrlText} unreachable: ${reason instanceof Error ? reason.message : String(reason)}`,
         0,
         undefined,
         { cause: error },
@@ -187,14 +206,19 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     if (!res.ok) {
       const oauthError = typeof json?.error === 'string' ? json.error : undefined;
       throw new DiadocAuthError(
-        `Token endpoint ${this.tokenUrl} -> ${String(res.status)}: ${text.slice(0, MAX_BODY_IN_MESSAGE)}`,
+        `Token endpoint ${this.tokenUrlText} -> ${String(res.status)}: ` +
+          this.redact(text).slice(0, MAX_BODY_IN_MESSAGE) +
+          hintFor(oauthError),
         res.status,
         oauthError,
       );
     }
     if (!json) {
+      // Never the body: a 2xx may be a form-encoded answer with fresh tokens in it.
       throw new DiadocAuthError(
-        `Token endpoint returned non-JSON (${String(res.status)}): ${text.slice(0, MAX_BODY_IN_MESSAGE)}`,
+        `Token endpoint ${this.tokenUrlText} returned non-JSON (${String(res.status)}, ` +
+          `${res.headers.get('content-type') ?? 'no content-type'}, ` +
+          `${String(Buffer.byteLength(text))} bytes)`,
         res.status,
       );
     }
@@ -211,11 +235,40 @@ export class RefreshTokenAuth implements AccessTokenProvider {
       if (rotated) await this.onRefreshTokenRotated?.(json.refresh_token);
     }
 
+    const lifetimeMs = Math.min(expiresInSeconds(json.expires_in), MAX_LIFETIME_S) * 1000;
     this.cached = {
       accessToken: json.access_token,
-      refreshAt: startedAt + expiresInSeconds(json.expires_in) * 1000 - this.expiryMarginMs,
+      // A short lifetime would leave no cached time at all with the full margin (a refresh, and
+      // maybe a token-file write, per API call): keep at least half of it.
+      refreshAt: startedAt + lifetimeMs - Math.min(this.expiryMarginMs, lifetimeMs / 2),
     };
     return json.access_token;
+  }
+}
+
+function printableUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return '(invalid token URL)';
+  }
+}
+
+/** What the operator can do about an OAuth error; names settings, never their values. */
+function hintFor(oauthError: string | undefined): string {
+  switch (oauthError) {
+    case 'invalid_grant':
+      // Also what a retry after a lost answer gets if that answer had rotated the token (R2 minor 11).
+      return (
+        '; the refresh token was rejected (expired, revoked or already used): issue a new one in ' +
+        'the integrator cabinet and put it into DIADOC_REFRESH_TOKEN_FILE (or DIADOC_REFRESH_TOKEN); ' +
+        'a left-over <file>.tmp next to the token file may hold a newer token'
+      );
+    case 'invalid_client':
+      return '; check DIADOC_CLIENT_ID and DIADOC_CLIENT_SECRET (the API key of the integrator cabinet)';
+    default:
+      return '';
   }
 }
 

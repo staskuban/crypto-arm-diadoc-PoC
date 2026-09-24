@@ -8,6 +8,7 @@ import {
   DiadocError,
   DiadocOperationPendingError,
   DiadocPostOutcomeUnknownError,
+  DiadocTokenDeadlineError,
   SHELF_MAX_BYTES,
   SHELF_UPLOAD_MAX_BYTES,
   type DocflowStatus,
@@ -543,6 +544,7 @@ describe('sendUtd failures before sending', () => {
     };
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'PRECHECK_REJECTED', step: 'precheck' });
+    expect(error.operationId).toBe(opId());
     expect(error.message).toMatch(/Контрагент не найден/);
     expect(error.details).toHaveLength(2);
     expect(diadoc.calls).toEqual(['canPostMessage']);
@@ -571,6 +573,63 @@ describe('sendUtd failures before sending', () => {
     const error = await failure(run({ fileName: FILE_NAME, content: padded(600_000) }));
     expect(error).toMatchObject({ code: 'SHELF_UPLOAD_FAILED', step: 'upload' });
     expect(diadoc.calls).not.toContain('postMessage');
+  });
+});
+
+describe('sendUtd token failures (R2 minor 11)', () => {
+  const authError = () =>
+    new DiadocAuthError(
+      'Token endpoint https://idp/token -> 400: invalid_grant',
+      400,
+      'invalid_grant',
+    );
+
+  it('reports a token failure in CanPostMessage as DIADOC_AUTH, not PRECHECK_FAILED', async () => {
+    const { diadoc, run } = setup();
+    const cause = authError();
+    diadoc.canPostResult = cause;
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'DIADOC_AUTH', step: 'precheck', cause });
+    expect(error.operationId).toBe(opId());
+    expect(error.message).toMatch(/invalid_grant/);
+  });
+
+  it('reports a token failure in the shelf upload as DIADOC_AUTH', async () => {
+    const { diadoc, run } = setup({ precheck: false });
+    diadoc.shelfResult = authError();
+    const error = await failure(run({ fileName: FILE_NAME, content: padded(600_000) }));
+    expect(error).toMatchObject({ code: 'DIADOC_AUTH', step: 'upload' });
+    expect(diadoc.calls).not.toContain('postMessage');
+  });
+
+  it('reports a token failure before PostMessage was sent as DIADOC_AUTH', async () => {
+    const { diadoc, run } = setup({ precheck: false });
+    diadoc.postResult = authError();
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'DIADOC_AUTH', step: 'post' });
+    expect(error.operationId).toBe(opId());
+    expect(error.message).not.toMatch(/may have been posted/);
+  });
+
+  it('keeps "may have been posted" when the token failed after a PostMessage request', async () => {
+    const { diadoc, run } = setup({ precheck: false });
+    diadoc.postResult = new DiadocPostOutcomeUnknownError(opId(), authError());
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'POST_FAILED', step: 'post' });
+    expect(error.message).toMatch(/may have been posted/);
+    expect(error.message).toMatch(/invalid_grant/);
+  });
+
+  it('keeps the step code when the token was not asked for lack of time', async () => {
+    const { diadoc, run } = setup({ precheck: false });
+    diadoc.postResult = new DiadocTokenDeadlineError('Token endpoint not asked: deadline');
+    expect(await failure(run())).toMatchObject({ code: 'POST_FAILED', step: 'post' });
+  });
+
+  it('finds a token failure wrapped as a cause', async () => {
+    const { diadoc, run } = setup();
+    diadoc.canPostResult = new Error('outer', { cause: authError() });
+    expect(await failure(run())).toMatchObject({ code: 'DIADOC_AUTH', step: 'precheck' });
   });
 });
 

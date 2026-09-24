@@ -82,6 +82,17 @@ export class DiadocAuthError extends Error {
   }
 }
 
+/**
+ * A token refresh was not started because it could not end before the caller's deadline: a lack of
+ * time, not a refusal by the IdP (the pipeline keeps the step's code for it).
+ */
+export class DiadocTokenDeadlineError extends DiadocAuthError {
+  constructor(message: string) {
+    super(message, 0);
+    this.name = 'DiadocTokenDeadlineError';
+  }
+}
+
 /** Missing or invalid Diadoc settings in env. Never carries secret values. */
 export class DiadocConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {

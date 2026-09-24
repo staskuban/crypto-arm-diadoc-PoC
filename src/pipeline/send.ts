@@ -2,9 +2,11 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
+  DiadocAuthError,
   DiadocConflictError,
   DiadocOperationPendingError,
   DiadocPostOutcomeUnknownError,
+  DiadocTokenDeadlineError,
   findDocumentEntity,
   SHELF_MAX_BYTES,
   type DiadocClient,
@@ -247,7 +249,7 @@ export async function sendUtd(
         'PRECHECK_REJECTED',
         'precheck',
         `CanPostMessage rejected ${utd.fileName}: ${blocking.map(describeValidation).join('; ')}`,
-        { details: blocking },
+        { details: blocking, operationId },
       );
     }
     log(`precheck ok${warnings.length > 0 ? ` (${String(warnings.length)} warnings)` : ''}`);
@@ -353,7 +355,10 @@ export async function sendUtd(
   /** An abort is not a pipeline failure: rethrow the signal's reason as is. */
   function wrap(name: PipelineStep, code: PipelineErrorCode, error: unknown): unknown {
     if (signal?.aborted && error === signal.reason) return error;
-    return new PipelineError(code, name, describe(error), { cause: error, operationId });
+    // Only the Diadoc steps: no other step talks to the IdP.
+    const diadocStep = name === 'precheck' || name === 'upload';
+    const authCode = diadocStep && isAuthFailure(error) ? 'DIADOC_AUTH' : code;
+    return new PipelineError(authCode, name, describe(error), { cause: error, operationId });
   }
 }
 
@@ -390,7 +395,10 @@ function postError(error: unknown, operationId: string, resend: string | undefin
     );
   }
   if (!(error instanceof DiadocConflictError)) {
-    return new PipelineError('POST_FAILED', 'post', describe(error), { cause: error, operationId });
+    // Checked after DiadocPostOutcomeUnknownError: a token failure after a sent request stays "may
+    // have been posted".
+    const code = isAuthFailure(error) ? 'DIADOC_AUTH' : 'POST_FAILED';
+    return new PipelineError(code, 'post', describe(error), { cause: error, operationId });
   }
   const code = (
     { duplicate: 'ALREADY_SENT', forbidden: 'RECIPIENT_FORBIDS', unknown: 'POST_CONFLICT' } as const
@@ -400,6 +408,18 @@ function postError(error: unknown, operationId: string, resend: string | undefin
       ? `${error.body.slice(0, MAX_CONFLICT_BODY)}… (${String(error.body.length)} chars)`
       : error.body;
   return new PipelineError(code, 'post', `409: ${body}`, { cause: error, operationId });
+}
+
+/**
+ * A DiadocAuthError, or an error caused by one; not a refresh skipped for lack of time before a
+ * deadline (DiadocTokenDeadlineError), which says nothing about the credentials.
+ */
+function isAuthFailure(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e instanceof Error && depth < 8; e = e.cause, depth++) {
+    if (e instanceof DiadocTokenDeadlineError) return false;
+    if (e instanceof DiadocAuthError) return true;
+  }
+  return false;
 }
 
 /** Same bound as DiadocError.message; the full body stays on `cause`. */
