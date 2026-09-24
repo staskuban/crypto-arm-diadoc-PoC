@@ -11,6 +11,8 @@ keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follo
 - Compose adds project-scoped names, `linux/amd64`, a loopback-only port, read-only `certs` and `secrets`
   mounts, `cap_drop: [ALL]`, `no-new-privileges` and a healthcheck.
 - It also splits build and run (D8, see [Build and run](#run)).
+- Read-only root filesystem with tmpfs for the paths the server writes, and CPU/memory/PID limits (I6, see
+  [Container hardening](#container-hardening)).
 - `LOG_LEVEL` defaults to `warn,error`. At the `log` level the server prints the first 8 characters of the API key
   on every request.
 - `JSON_LIMIT` (default `50mb`) caps the request body at exactly 52 428 800 B; one byte more is answered with
@@ -111,6 +113,64 @@ reads 0600 files with no capabilities (verified). On a Linux host they keep the 
 `CAP_DAC_READ_SEARCH` cannot read another user's 0600 file or 0700 directory (verified with `--cap-drop ALL`).
 There, either `chown root` the `secrets`/`certs` files, or add `cap_add: [DAC_READ_SEARCH]` in a
 `docker-compose.override.yml`. `cert_storage` must be owned by root; Docker creates it that way if it is missing.
+
+## Container hardening
+
+The container runs with `read_only: true` (I6). The writable paths below were found with `docker diff` on a
+running stand after a smoke run. The tmpfs mounts are empty after every start or restart, and `start.sh` refills them.
+
+| Path                        | Mount                 | Written by                                                                                                                    |
+| --------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `/var/opt/cprocsp`          | bind `./cert_storage` | CSP store: keys, `uMy`/`mroot`, locks (unchanged)                                                                             |
+| `/etc/opt/cprocsp`          | tmpfs 16 MB           | CSP configuration incl. `license.ini`; `start.sh` seeds it from `/etc/opt/cprocsp_default` (image)                            |
+| `/etc/opt/Trusted`          | tmpfs 1 MB, 0700      | `license.lic` from `start.sh`                                                                                                 |
+| `/var/lib/cryptoarm-server` | tmpfs 16 MB, 0700     | `cash.json`, the server's PKI store cache. It opens it relative to its working dir `/`, so the image links `/cash.json` there |
+| `/tmp`                      | tmpfs 256 MB          | `os.tmpdir()`: temporary PFX files when `/cms/sign` gets a `.pfx` as `cert`                                                   |
+| `/var/cache/fontconfig`     | tmpfs 16 MB           | font cache of the PDF reports                                                                                                 |
+
+The tmpfs mounts are `noexec,nosuid,nodev`. Fontconfig also tries to write `.uuid` files into `/usr/share/fonts`;
+that fails silently. The PDF report of the Документы smoke still works. The upstream TSL auto-update
+(`TSL_AUTO_UPDATE_ENABLED`, off by default) writes into `./certs`, which is mounted read-only: leave it off.
+
+Limits (override them from the shell or in `docker/cryptoarm-server/.env`; compose interpolates the included file with the `.env` of its own directory, and the same file is also the container's `env_file`, see `.env.example`). A value above the CPUs of the Docker VM fails the start ("range of CPUs is from 0.01 to N"): `CRYPTOARM_SERVER_CPUS` (default `2`), `CRYPTOARM_SERVER_MEMORY`
+(`2g`), `CRYPTOARM_SERVER_PIDS` (`256`). Measured on the throwaway stand: ~190–320 MiB and 13 PIDs idle, and a 30 MB
+payload signs in 1.4 s under these limits. tmpfs contents count towards the memory limit.
+
+The healthcheck also requires `/etc/opt/cprocsp/config64.ini`. With an **image older than I6** under this compose
+file, nothing seeds the tmpfs: the API answers, but CSP fails with `Provider DLL failed to initialize correctly
+[0x8009001d]` and `/cms/sign` returns "key not found" (verified, D40). The check turns that into `unhealthy`, so
+`up --wait` fails instead of reporting a working stand. The other direction is safe: the new image under an older
+compose file starts and signs as before (verified).
+
+**Rollout on the shared stand** (after merging I6 into `graph-root`; run from the `graph-root` worktree; recreates
+the server container for about 30 s, so warn whoever uses the stand, e.g. T7):
+
+```sh
+docker image inspect kryptoarm-diadoc/cryptoarm-server:pre-i6 >/dev/null 2>&1 ||  # never overwrite it on a re-run
+  docker tag kryptoarm-diadoc/cryptoarm-server:local kryptoarm-diadoc/cryptoarm-server:pre-i6  # rollback image
+docker compose build cryptoarm-server-image         # FIRST: the new compose file needs the new image (D40)
+docker compose --dry-run up -d                      # expect only cryptoarm-server to be recreated
+docker compose up -d --wait cryptoarm-server        # fails if unhealthy (old image or CSP broken)
+docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' \
+  kryptoarm-diadoc-cryptoarm-server                 # true 2147483648 256
+K="$(head -1 docker/cryptoarm-server/secrets/api_keys)"
+CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 scripts/smoke-server.sh
+CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer CRYPTOARM_SERVER_API_KEY="$K" SMOKE_STRICT=1 \
+  scripts/smoke-server.sh
+# + the signer integration tests (CLAUDE.md) and scripts/smoke-documents.sh for both users
+```
+
+The Документы stand can stay up. It is attached to the network `graph-root_default`, which survives the
+server's recreation, and it finds the new container by name. On the throwaway stand `smoke-documents.sh` passed
+after a `--force-recreate` of the server without restarting `documents-api`. `cert_storage` (the keys, including
+the I3 key) is a bind mount and is kept.
+
+**Rollback:** `git checkout <commit before the I6 merge> -- docker/cryptoarm-server/docker-compose.yml`. To also go
+back to the old image, run `docker tag kryptoarm-diadoc/cryptoarm-server:pre-i6 kryptoarm-diadoc/cryptoarm-server:local`
+now, **after** restoring the file and **before** `up`. Then run `docker compose up -d --wait cryptoarm-server`; compose
+recreates the container when the config or the image ID changed. The I6 image also works under the old file, so the
+retag is optional. Never run the old image with the new file (D40). Commit the restored compose file (or revert the
+merge) in `graph-root`, so that the next `up` does not re-apply it.
 
 ## Certificates and keys
 
