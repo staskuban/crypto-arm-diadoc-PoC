@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Proof of concept, **no code yet**. Sections marked *(planned)* describe intent, not existing files — update them as soon as the scaffold lands.
+Proof of concept. Scaffold is in place (`src/{signer,diadoc,utd,pipeline}/index.ts` are empty stubs). Sections marked *(planned)* describe intent, not existing files — update them when the code lands.
 
 - Task DAG, per-task status and done-criteria: `docs/plan.md` (source of truth for the Orca worktree tree; the `graph-root` worktree is the root parent of every task worktree).
 - Research findings with sources (Диадок formats, signing infrastructure): `docs/research.md`.
@@ -24,7 +24,16 @@ Only public APIs of both systems are used. No database — state lives in Кри
 
 - TypeScript + Docker (docker compose for local/test environment). No DB.
 - **TDD is mandatory**: write a failing test first, then the implementation. Unit tests mock HTTP at the client boundary; integration tests run against the dockerized КриптоАРМ Server and the Диадок test environment.
-- Build / lint / test commands: *(planned — fill in after scaffold: install, build, lint, unit tests, single-test invocation, integration tests, `docker compose up`)*.
+- Node 22 LTS (`.nvmrc`, `engine-strict`), package manager **npm** (commit `package-lock.json`). ESM (`"type": "module"`, `NodeNext` — relative imports need `.js` extensions). TypeScript is pinned to `~6.0` because `typescript-eslint` does not support TS 7 yet.
+- Layout: `src/<module>/index.ts` per module; unit tests colocated as `src/**/*.test.ts` (excluded from the build via `tsconfig.build.json`).
+- Commands:
+  - install: `npm ci`
+  - build (→ `dist/`): `npm run build`; type-check incl. tests: `npm run typecheck`
+  - lint (ESLint flat config, `strictTypeChecked` + Prettier check): `npm run lint`; autoformat: `npm run format`
+  - unit tests (Vitest): `npm test`; watch: `npm run test:watch`
+  - single test: `npm test -- src/scaffold.test.ts -t "resolves every"` (file path and/or `-t <name pattern>`)
+  - integration tests: *(planned — T6)*
+  - local environment: `docker compose up` (root `docker-compose.yml`; the КриптоАРМ Server service is `include`d from `docker/cryptoarm-server` once I1 is merged).
 
 ## Development workflow (Orca worktrees)
 

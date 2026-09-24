@@ -1,0 +1,9 @@
+# Local/test environment. Service definitions live next to their Dockerfiles
+# and are pulled in via `include` (Compose >= 2.20).
+#
+# Uncomment once task I1 (docker/cryptoarm-server) is merged into graph-root:
+# include:
+#   - path: docker/cryptoarm-server/docker-compose.yml
+#     env_file: .env
+
+services: {}
