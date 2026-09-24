@@ -101,8 +101,17 @@ services:
       start_period: 90s
 
   documents-db:
-    image: ${DOCUMENTS_DB_IMAGE:-postgres:14.4}
+    # Tag + index digest (== the image the I2 stand pulled, checked 2026-09-24).
+    image: ${DOCUMENTS_DB_IMAGE:-postgres:14.4@sha256:9ceb24f8c5f15c053d973a3610866f473690875dc13eb3282b45302189321040}
     restart: unless-stopped
+    # F17: as the image's postgres user from the start, the entrypoint skips its root-only steps
+    # (chown of PGDATA, gosu), so the container needs no capability. The data volume is already
+    # owned by 999 (initdb ran as postgres). On a Linux host the bind-mounted password file must be
+    # readable by uid 999 (Docker Desktop maps it), see README.md.
+    user: '999:999'
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     read_only: true
     tmpfs:
       - /run/postgresql:size=1m,mode=2775,uid=999,gid=999 # socket + lock (image default mode/owner)
@@ -132,12 +141,19 @@ services:
 
   # Stand-in for the corporate CA API (CA_API_URI): e-mail -> public .cer, see ca-stub/nginx.conf.
   ca-stub:
-    image: ${DOCUMENTS_CA_STUB_IMAGE:-nginx:1.27-alpine}
+    # Tag + index digest (== the image the I2 stand pulled, checked 2026-09-24).
+    image: ${DOCUMENTS_CA_STUB_IMAGE:-nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10}
     restart: unless-stopped
+    # F17: master and workers as the image's nginx user (port 8080 needs no privilege; the `user`
+    # directive of nginx.conf is then ignored with a warning), so no capability is needed.
+    user: '101:101'
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     read_only: true
     tmpfs:
-      - /var/cache/nginx:size=8m
-      - /run:size=1m # nginx.pid
+      - /var/cache/nginx:size=8m,uid=101,gid=101
+      - /run:size=1m,uid=101,gid=101 # nginx.pid
     cpus: ${DOCUMENTS_CA_STUB_CPUS:-0.25}
     mem_limit: ${DOCUMENTS_CA_STUB_MEMORY:-64m}
     pids_limit: ${DOCUMENTS_CA_STUB_PIDS:-32}
