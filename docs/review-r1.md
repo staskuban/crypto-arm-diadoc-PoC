@@ -105,7 +105,7 @@ How it was checked:
    - Mitigated today by the loopback-only port (compose:17).
 5. **Fixed in I5** (`umask 077` in `fetch-test-certs.sh`: `.pfx` 0600, public `.cer` explicitly 0644; README says `chmod 600 .env`). **Host file modes.** The local `.env` files and `certs/user/cryptoarm.server.test.pfx` (no PIN) are `0644`. Fix: `umask 077` in `scripts/fetch-test-certs.sh`, and recommend `chmod 600 .env` in the README.
 6. **Fixed in I5** (`-H @file`; default `LOG_LEVEL=warn,error`: the key prefix is logged at the `log` level, not `debug`, so `log,warn,error` would still print it). **API key in argv.** `scripts/smoke-server.sh:47` passes `-H "X-API-Key: $api_key"`, which shows up in `ps`. Fix: `curl -H @file`. Related: the server logs the first 8 characters of the API key on every request at the default `LOG_LEVEL=debug,…` (seen in `docker logs`; request bodies are *not* logged — checked with 3.9 MB requests). Default the stand to `log,warn,error`.
-7. **The signer config is laxer than the Диадок config.**
+7. **Documented in F8, code unchanged (D20).** **The signer config is laxer than the Диадок config.**
    - `CRYPTOARM_SERVER_URL` accepts `http://` to any host (`src/signer/server-cms-signer.ts:197`), so `X-API-Key` and the document can travel in cleartext.
    - `changeme` is not rejected (`src/signer/config.ts:17-33`).
    - The same `changeme` gap exists for `DIADOC_FROM_BOX_ID` / `DIADOC_TO_BOX_ID` (`src/pipeline/config.ts:58-62`).
@@ -133,11 +133,11 @@ How it was checked:
 
 ## Docs vs code drift
 
-- `docs/plan.md`: T3, F2 and T5 still say "branch …, not merged"; they are merged (`a6b492b`, `e3619b8`, `98e17c4`).
-- `docs/research.md:41` says "`ServerCmsSigner` accepts it as is; whether Диадок accepts BER … is checked in S1/T6". This is stale after F2 (DER normalisation; D1 is moot).
-- `docs/research.md:42` lists `CRYPTOPRO_LICENSE` as required; `CLAUDE.md` and the README say empty = Demo trial.
+- **Fixed in D-docs (`c57dfd9`) and F8** (later rows too: F3, F5, D8). `docs/plan.md`: T3, F2 and T5 still say "branch …, not merged"; they are merged (`a6b492b`, `e3619b8`, `98e17c4`).
+- **Fixed in D-docs (`c57dfd9`).** `docs/research.md:41` says "`ServerCmsSigner` accepts it as is; whether Диадок accepts BER … is checked in S1/T6". This is stale after F2 (DER normalisation; D1 is moot).
+- **Fixed in D-docs (`c57dfd9`), extended in F8.** `docs/research.md:42` lists `CRYPTOPRO_LICENSE` as required; `CLAUDE.md` and the README say empty = Demo trial.
 - **Fixed in F5.** `CLAUDE.md`: "exit 1 failed (stderr has `[CODE]` from `PipelineError`)". Config and env failures (`SignerConfigError`, `DiadocConfigError`, `PipelineConfigError`, the token-file check) print `error: …` without a code (`src/cli.ts:171-180`).
-- The root `.env.example` has `CRYPTOARM_SERVER_API_KEY=changeme` and `SIGNER_CERT_PATH=./certs/signer.cer` (no such file), while the stand has `API_KEYS=change-me-api-key` and `CLAUDE.md` uses `docker/cryptoarm-server/certs/cryptoarm.server.test.cer`. Copying both examples as is gives a 401 / ENOENT.
+- **Fixed in D-docs (`c57dfd9`) and F8** (the stand now has no default key: the root example says to copy one from `secrets/api_keys`, D21). The root `.env.example` has `CRYPTOARM_SERVER_API_KEY=changeme` and `SIGNER_CERT_PATH=./certs/signer.cer` (no such file), while the stand has `API_KEYS=change-me-api-key` and `CLAUDE.md` uses `docker/cryptoarm-server/certs/cryptoarm.server.test.cer`. Copying both examples as is gives a 401 / ENOENT.
 
 ## Proposed follow-up tasks
 
@@ -149,7 +149,7 @@ How it was checked:
 | F6 operation-id | Hash `idFile` instead of `fileName` (or require `.xml`); fold into T8's salt/`--resend` design — **done in T8** | minor 12, 13 | T8 |
 | I5 stand-hardening | Pin base image digest; secrets as files/Docker secrets; log `certmgr` errors; fix PIN index; bind-mount the CSP tgz; exec-form CMD + `init`; `cap_drop`/`no-new-privileges`; `umask 077` in `fetch-test-certs.sh`; `curl -H @file`; `LOG_LEVEL` without debug | M7, M8, minor 1–6 | I1 (graph-root) |
 | T9 seam-tests | Real `DiadocClient` + mock fetch under `sendUtd` on the fixture (inline and shelf, byte-for-byte); real `ServerCmsSigner` + BER fixture; large-payload signer integration case | minor 15, 16 | T5 |
-| D-docs | Fix `plan.md` statuses, `research.md` BER/licence lines, `.env.example` alignment; signer config policy parity | drift, minor 7 | graph-root |
+| D-docs (→ F8) | Fix `plan.md` statuses, `research.md` BER/licence lines, `.env.example` alignment; signer config policy parity | drift, minor 7 | graph-root |
 
 Minor 17 needs no task (documented leniency; revisit with T7).
 
