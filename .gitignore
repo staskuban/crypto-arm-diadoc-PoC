@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# КриптоПро CSP distribution (downloaded manually)
+cryptopro/*.tgz
+
+.DS_Store
