@@ -651,7 +651,7 @@ describe('sendUtd status polling', () => {
     diadoc.documents = [{ DocflowStatus: status('Success') }];
     await run();
     expect(diadoc.getOptions).toEqual([
-      { deadline: 1_000_000 + 10_000, signal: controller.signal },
+      { deadline: NOW + 10_000, signal: controller.signal },
     ]);
   });
 
