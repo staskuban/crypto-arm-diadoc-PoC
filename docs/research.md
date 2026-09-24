@@ -38,6 +38,7 @@ Endpoints and headers. Everything comes from `authentication.html`, `howtostart/
 - `POST /cms/sign` DTO (`src/controllers/dto/cms.dto.ts`): `cert`, `data`, `password`, `detached` (default **true**), `cadesStandard` (`CAdES-BES` default; `-T`, `-X Long Type 1`, `-A` need a TSP URL), `tspServiceAddress`.
 - Service (`src/services/cms.service.ts`): `applySignedDataCryptoSignOptions(cms, detached !== false, ...)` → `cms.policies = ['detached']`.
 - Key lookup (`src/services/cert-store.helper.ts` `resolveSigningCertificate`): PKCS#12 → temporary install into `uMy`; plain X.509 → find the private key in the store by thumbprint. So keys can be installed once at container start (`/certs/user/*.pfx` or `CERT_PFX_BASE64`/`CERT_PFX_PIN`) and clients send only the public `.cer`.
+- `/cms/sign` returns the CMS as **BER with indefinite lengths** (`30 80 …`), not strict DER (verified on the I1 stand, 2026-09-24). `ServerCmsSigner` accepts it as is; whether Диадок accepts BER in `Signature` is checked in S1/T6. `/cms/verify` answers a data mismatch with `201 {isValidSign:false}`, not a 4xx.
 - Build: image built locally from `docker/Dockerfile`; requires human-downloaded КриптоПро CSP 5.0 `linux-amd64_deb.tgz`, `TRUSTED_LICENSE`, `CRYPTOPRO_LICENSE`; x86_64 only.
 - Test material in repo: `certs/crypto.root.test.cer`, `certs/cryptoarm.server.test.{cer,pfx}` (CRYPTO-PRO Test Center 2).
 
