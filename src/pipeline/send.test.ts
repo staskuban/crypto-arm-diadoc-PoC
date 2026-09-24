@@ -650,9 +650,7 @@ describe('sendUtd status polling', () => {
     const { diadoc, run } = setup({ signal: controller.signal });
     diadoc.documents = [{ DocflowStatus: status('Success') }];
     await run();
-    expect(diadoc.getOptions).toEqual([
-      { deadline: NOW + 10_000, signal: controller.signal },
-    ]);
+    expect(diadoc.getOptions).toEqual([{ deadline: NOW + 10_000, signal: controller.signal }]);
   });
 
   it('an abort during GetDocument ends polling without a statusError', async () => {
