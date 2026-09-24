@@ -34,6 +34,8 @@ Mandatory process for any multi-task work:
 3. **Dependent worktrees get the dependency as parent**: a child worktree branches from its parent's worktree/branch, not from `master`.
 4. **After each task completes**: merge it into its parent, then run integration tests on the parent.
 5. **If integration breaks**: fix it in a **separate new worktree** (child of the broken parent), not by patching inside the finished task's worktree.
+6. **Naming**: every task worktree name/display name starts with its task code from `docs/plan.md` (e.g. `T2-signer`, `I1-infra-server`).
+7. **Board status**: when a task is finished (report written, `docs/plan.md` status updated), move its worktree to `in-review` on the Orca workspace board: `orca worktree set --worktree active --workspace-status in-review --json`.
 
 Git: default branch is `master` (not `main`). The stash stack is shared across worktrees — never use bare `git stash`/`git stash pop`.
 
