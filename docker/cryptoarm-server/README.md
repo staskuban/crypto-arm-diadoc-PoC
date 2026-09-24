@@ -109,7 +109,18 @@ container config (`docker inspect`) and `/proc/*/environ`. Values in files do no
 The server process gets `TRUSTED_LICENSE=""` and `CRYPTOPRO_LICENSE=""`: it only checks that they are defined.
 The КриптоАРМ license is written to `/etc/opt/Trusted/CryptoARM Server/license.lic`, the same file upstream's
 `setup_license` writes. `API_KEYS` must stay in the server's env, because the server reads it only from there.
-The file may hold one key per line.
+The file may hold one key per line or comma-separated keys. `start.sh` trims the keys and drops empty ones, as the
+server does (`dist/config.js`); a key with whitespace inside stops the start (F16).
+
+`AUTH_MODE` (from `.env`) is checked at start, because the server's middleware compares it literally (F16, D160,
+verified on a throwaway stand): `apikey` with no key rejects every request (401), and any value other than `none` or
+`apikey` (`APIKEY`, an empty `AUTH_MODE=`, a typo) lets every request through without a key, and so does a missing
+`AUTH_MODE` (upstream default `?? "none"`). So `apikey` without a key, any other value and a missing variable stop the
+start with an error; an explicit `AUTH_MODE=none` starts with a warning.
+
+`cpconfig -license -set` and `tsputil`/`ocsputil license -s` output is logged with the licence value redacted (also
+without its dashes: `cpconfig -license -view` prints the serial without them); a rejected licence stops the start
+with the tool's exit code. Checked with invalid serials only (the tools do not echo those); a real serial is D42.
 
 What is still exposed: `cpconfig`/`tsputil`/`ocsputil`/`certmgr` accept the CSP licenses and PFX PINs only as
 argv. They are visible in the container's process list for the duration of that call at start.
@@ -278,8 +289,9 @@ same user as the server, so the key lands in root's `uMy`.
    checks for it first. This entropy source is acceptable **for a test key only**. A production key needs a proper
    RNG, such as a seeded CPSD or hardware.
 2. The request goes to `certfnsh.asp` (`Mode=newreq`). The certificate comes from `certnew.cer?ReqID=N&Enc=bin`.
-   The issuer comes from the certificate's AIA URL (http/https only). It is trusted only if it is self-signed and its
-   subject equals the certificate's issuer. The GOST signature is not checked on the host, which has no GOST
+   The issuer comes from the certificate's AIA URL (http/https only). It is trusted only if it is self-signed, its
+   subject equals the certificate's issuer, and its SHA-256 is in `scripts/test-ca-roots.sha256` (F16; the
+   same allowlist `fetch-test-certs.sh` checks its download against). The GOST signature is not checked on the host, which has no GOST
    provider. The CA issues at once, with no manual approval. `https://` fails
    with an untrusted TLS chain, so the script uses `http://`, the same scheme as the AIA/CRL URLs in the certificates.
 3. `certmgr -inst -store mroot` installs the issuer. `certmgr -inst -store uMy -cont … -at_signature -to-container`
@@ -288,7 +300,10 @@ same user as the server, so the key lands in root's `uMy`.
 4. Only public certificates are written on the host: `certs/o2-platforma.test.cer` and
    `certs/root/cryptopro-test-ca-2012-<N>.cer`. Both are git-ignored.
 
-The script refuses to run if the key container already exists, so it never deletes a key it did not create. If a
+The script refuses to run if the key container already exists, if `csptest -enum_cont` fails (a failed listing
+must not read as "not found", R2 M3), or if another run holds the same name (lock directory
+`/tmp/<KEY_CONTAINER>.lock` in the container, taken before the listing and removed on exit; `/tmp` is a tmpfs, so a
+lock left by `kill -9` disappears with a restart), so it never deletes a key it did not create. If a
 step fails before the certificate is bound, the new key container is deleted again, and a keygen still running in
 the container is killed first. An issuer that was already installed into `mroot` stays there.
 
@@ -300,7 +315,8 @@ CERT_FILE=docker/cryptoarm-server/certs/o2-platforma.test.cer SMOKE_STRICT=1 \
 ```
 
 Env: `CRYPTOARM_CONTAINER`, `TEST_CA_URL`, `CERTS_DIR` (for example, the certs dir of the worktree the stand
-runs from), `CERT_NAME`, `KEY_CONTAINER` (must not exist yet), `KEYGEN_TIMEOUT` (default 300 s), and the subject values `ORG_*` / `SIGNER_*` (see the script header). The
+runs from), `CERT_NAME`, `KEY_CONTAINER` (must not exist yet), `KEYGEN_TIMEOUT` (default 300 s), `TEST_CA_ROOTS_FILE`
+(default `scripts/test-ca-roots.sha256`), and the subject values `ORG_*` / `SIGNER_*` (see the script header). The
 signer person is a **placeholder** (`SN=Тестов`, `G=Тест Тестович`, `T=Генеральный директор`). Tests with a fake
 `docker` and a fake CA: `scripts/test/issue-test-cert.test.sh`.
 
@@ -322,8 +338,10 @@ Notes:
 - **Validity is capped by the CA certificate.** The test CA currently has a single certificate, renewal 21
   (2026-07-28 – 2026-10-28), and it issues nothing past its own expiry. Any certificate issued now therefore expires
   on 2026-10-28, the same day as the upstream test certificate. Assumption, based on this one renewal only: the CA rolls its key
-  about every 3 months. After it does, re-run the script: it picks up the new issuer from AIA, installs it into `mroot` and stores it under
-  `certs/root/`. `scripts/fetch-test-certs.sh` hardcodes renewal 21 and its SHA-256, so it must be updated then too.
+  about every 3 months. After it does, check the new root out of band and add its SHA-256 to
+  `scripts/test-ca-roots.sha256` (until then the script refuses it), then re-run the script: it picks up the new issuer
+  from AIA, installs it into `mroot` and stores it under `certs/root/`. `scripts/fetch-test-certs.sh` hardcodes the
+  renewal-21 URL and file name (its hash comes from the same allowlist), so it must be updated then too.
 - Subject strings are `BMPString`, because cryptcp encodes them that way in the request and the CA copies them.
   ИНН/ОГРН are `NumericString`.
 - "Never leaves the container" is only half true. `/var/opt/cprocsp` is a **bind mount** of `cert_storage/` in the
