@@ -167,8 +167,8 @@ file, nothing seeds the tmpfs: the API answers, but CSP fails with `Provider DLL
 `up --wait` fails instead of reporting a working stand. The other direction is safe: the new image under an older
 compose file starts and signs as before (verified).
 
-**Rollout on the shared stand** (I6 + F10). Run it in the `graph-root` worktree **after** F10 is merged there, in a
-fresh terminal (no `CRYPTOARM_*` exports left over from a throwaway stand). Order: this server first, then the
+**Rollout on the shared stand** (I6 + F10; done on the shared stand 2026-09-24, see the F10 row of `docs/plan.md`).
+Run it in the `graph-root` worktree **after** F10 is merged there, in a fresh terminal (no `CRYPTOARM_*` exports left over from a throwaway stand). Order: this server first, then the
 Документы stand of project `kryptoarm-diadoc-i2` (its README). The server container is recreated (~10 s until
 `healthy` once the image is built), so warn whoever uses the stand. The git-ignored
 `docker/cryptoarm-server/{secrets,certs,cert_storage}` of `graph-root` hold the licence, the API key and the keys
@@ -242,6 +242,27 @@ git commit -m "Roll back the server compose file to pre-I6" docker/cryptoarm-ser
 
 The I6 image also works under the old file (verified), but never run the old image with the I6 file (D40): with F10
 that needs an explicit `CRYPTOARM_SERVER_IMAGE=…:local`, so do not set it.
+
+**Changes baked into the image under the same tag** (F16: `start.sh`). The compose file stays the same, so the
+tag stays `…:stand-i6`; only the image moves. Before the build, keep the running image under a rollback tag named
+after the task (`…:pre-f16`), then build, dry-run (`Recreate` for `kryptoarm-diadoc-cryptoarm-server` only),
+`up -d --wait cryptoarm-server` and both smokes as in step 3 above. State on 2026-09-24 (checked read-only in F18):
+the shared container runs the rebuilt `…:stand-i6` (`healthy`, read-only, 2g/256), its
+`/usr/local/bin/cryptoarm-start` is byte-identical to `docker/cryptoarm-server/start.sh` of F16, and `…:pre-f16` is
+the I6 image before that build. Rollback (not rehearsed; compose recreates the container because its image ID
+differs from the tag's). The first line keeps the F16 image as `…:f16` for a later roll-forward; the dry run must show
+`Recreate` for `kryptoarm-diadoc-cryptoarm-server` only:
+
+```sh
+cd /Users/stassidoryuk/orca/workspaces/kryptoarm-plus-diadoc/graph-root
+docker image inspect kryptoarm-diadoc/cryptoarm-server:f16 >/dev/null 2>&1 || docker tag kryptoarm-diadoc/cryptoarm-server:stand-i6 kryptoarm-diadoc/cryptoarm-server:f16
+docker tag kryptoarm-diadoc/cryptoarm-server:pre-f16 kryptoarm-diadoc/cryptoarm-server:stand-i6
+docker compose --dry-run up -d
+docker compose up -d --wait cryptoarm-server
+```
+
+The pre-F16 `start.sh` ran the shared stand with the same `.env` and `secrets/` before the rebuild; it only lacks the
+F16 checks (`API_KEYS` normalisation, `AUTH_MODE`, redacted licence-tool output).
 
 ## Certificates and keys
 
