@@ -41,8 +41,10 @@ fetch() { # url, destination, expected sha256, mode
 
 fetch "$api/certs%2Fcryptoarm.server.test.cer/raw?ref=$ref" "$certs/cryptoarm.server.test.cer" \
   e86e76e9448c87cc409bb09562367db8e41709499ced623a1e3dda1f694ccc54 0644
+# The root's hash comes from the allowlist scripts/issue-test-cert.sh checks too.
+root_sha="$(awk '$2 == "cryptopro-test-ca-2012-21.cer" { print $1 }' "$repo_root/scripts/test-ca-roots.sha256")"
+[ -n "$root_sha" ] || { echo "cryptopro-test-ca-2012-21.cer is not in scripts/test-ca-roots.sha256" >&2; exit 1; }
 fetch "http://testgost2012.cryptopro.ru/CertEnroll/testgost2012(21).crt" \
-  "$certs/root/cryptopro-test-ca-2012-21.cer" \
-  6664740262766f0428379bb6ff2340c2d8497ce1862cd4e04f6353c2e978fb03 0644
+  "$certs/root/cryptopro-test-ca-2012-21.cer" "$root_sha" 0644
 fetch "$api/certs%2Fcryptoarm.server.test.pfx/raw?ref=$ref" "$certs/user/cryptoarm.server.test.pfx" \
   940667a7a2ea91c0f3aa4e50cc91c3969c0ba83b500f76e02666e02ecc59ba64 0600

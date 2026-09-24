@@ -131,6 +131,16 @@ expect_success "signs as DOCUMENTS_SIGNER_EMAIL (existing user)" DOCUMENTS_SIGNE
 grep -q "signer user o2@documents.test exists" "$work/out" && pass "resets the password of an existing signer user" ||
   fail "existing signer user not reused"
 
+# 3a. The admin itself as DOCUMENTS_SIGNER_EMAIL: its password must never be reset (R2 minor 20).
+start_mock ok
+expect_failure "refuses the admin as DOCUMENTS_SIGNER_EMAIL" "is the admin" DOCUMENTS_SIGNER_EMAIL=admin@documents.test
+if ls "$work/rec/"*-PUT-api_v1_users_* >/dev/null 2>&1 || ls "$work/rec/"*-POST-api_v1_users.body >/dev/null 2>&1; then
+  fail "changes a user although the signer is the admin"
+else
+  pass "does not touch the admin user"
+fi
+expect_success "the admin password still works after the refusal"
+
 # 4. A given file is signed as is (УПД bytes), with its MIME type.
 printf '<?xml version="1.0" encoding="windows-1251"?>\n<\xd4\xe0\xe9\xeb/>\n' >"$work/utd.xml"
 start_mock ok

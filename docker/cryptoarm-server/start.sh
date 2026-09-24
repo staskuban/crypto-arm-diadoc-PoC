@@ -9,7 +9,12 @@
 #   <VAR>                   env value
 # for VAR in TRUSTED_LICENSE CRYPTOPRO_LICENSE CRYPTOPRO_TSP_LICENSE CRYPTOPRO_OCSP_LICENSE API_KEYS.
 # The license values are not passed on to the server process (it only needs the variables defined);
-# API_KEYS is (the server reads it only from env). An api_keys file may list one key per line.
+# API_KEYS is (the server reads it only from env). An api_keys file may list one key per line; keys
+# are split on newlines and commas, trimmed, empty ones dropped (as the server does), and a key with
+# whitespace inside stops the start. AUTH_MODE must be set explicitly to none (no auth, warned about)
+# or to apikey with at least one key: upstream rejects every request for apikey without keys and lets
+# every request through for any other value (e.g. APIKEY, empty) or when it is unset, so all of
+# these stop the start.
 #
 # Key containers: *.pfx / *.p12 in $CERTS_DIR/user and $SECRETS_DIR go to uMy; a PIN is read from
 # the sibling file <container>.pin. Legacy CERT_PFX_BASE64 / CERT_PFX_PIN (comma-separated, PINs by
@@ -18,7 +23,7 @@
 #
 # Residual exposure: CSP / TSP / OCSP licenses and PFX PINs are passed to cpconfig / tsputil /
 # ocsputil / certmgr as argv (no other input exists), visible in the container's process list for
-# the duration of that call at start.
+# the duration of that call at start. The tools' output is logged with the licence value redacted.
 #
 # A failed certificate/key install is logged with certmgr's output (PIN redacted) and the start
 # continues; a failed license setup or an unreadable *_FILE stops it.
@@ -81,6 +86,18 @@ redact() {
   fi
 }
 
+# set_license <what> <value> <tool> <args...>: runs a licence tool, logs its output with <value>
+# (also without its dashes) redacted, stops the start if the tool fails.
+set_license() {
+  what="$1" value="$2"
+  shift 2
+  if output="$("$@" 2>&1)"; then status=0; else status=$?; fi
+  if [ -n "$output" ]; then
+    redact "$(redact "$output" "$value")" "$(printf '%s' "$value" | tr -d -)" | sed 's/^/    /' >&2
+  fi
+  [ "$status" -eq 0 ] || die "$what (exit $status)"
+}
+
 # certmgr_install <what> <pin> <certmgr args...>: runs certmgr, logs a failure with its output.
 certmgr_install() {
   what="$1" pin="$2"
@@ -127,7 +144,7 @@ fi
 csp_license="$(secret CRYPTOPRO_LICENSE)"
 if [ -n "$csp_license" ]; then
   log "setting КриптоПро CSP license"
-  "$CPCONFIG_BIN" -license -set "$csp_license" || die "cpconfig rejected CRYPTOPRO_LICENSE"
+  set_license "cpconfig rejected CRYPTOPRO_LICENSE" "$csp_license" "$CPCONFIG_BIN" -license -set "$csp_license"
 else
   log "no CRYPTOPRO_LICENSE: КриптоПро CSP runs on the trial license"
 fi
@@ -137,12 +154,12 @@ fi
 tsp_license="$(secret CRYPTOPRO_TSP_LICENSE)"
 if [ -n "$tsp_license" ]; then
   log "setting TSP license"
-  "$TSPUTIL_BIN" license -s "$tsp_license" || die "tsputil rejected CRYPTOPRO_TSP_LICENSE"
+  set_license "tsputil rejected CRYPTOPRO_TSP_LICENSE" "$tsp_license" "$TSPUTIL_BIN" license -s "$tsp_license"
 fi
 ocsp_license="$(secret CRYPTOPRO_OCSP_LICENSE)"
 if [ -n "$ocsp_license" ]; then
   log "setting OCSP license"
-  "$OCSPUTIL_BIN" license -s "$ocsp_license" || die "ocsputil rejected CRYPTOPRO_OCSP_LICENSE"
+  set_license "ocsputil rejected CRYPTOPRO_OCSP_LICENSE" "$ocsp_license" "$OCSPUTIL_BIN" license -s "$ocsp_license"
 fi
 
 trusted_license="$(secret TRUSTED_LICENSE)"
@@ -155,8 +172,39 @@ else
   log "WARNING: TRUSTED_LICENSE is empty; the server will refuse to start (\"Trusted Crypto license is invalid\")"
 fi
 
-api_keys="$(secret API_KEYS)"
-api_keys="$(printf '%s' "$api_keys" | tr -s '\r\n' ',,' | sed 's/,*$//')"
+# --- API keys and auth mode (see the header).
+api_keys_raw="$(secret API_KEYS)"
+if ! api_keys="$(API_KEYS_RAW="$api_keys_raw" awk 'BEGIN {
+  n = split(ENVIRON["API_KEYS_RAW"], parts, /[,\r\n]/); out = ""; k = 0
+  for (i = 1; i <= n; i++) {
+    key = parts[i]; gsub(/^[ \t\v\f]+|[ \t\v\f]+$/, "", key)
+    if (key == "") continue
+    k++
+    if (key ~ /[ \t\v\f]/) { print k; exit 3 }
+    out = out (out == "" ? "" : ",") key
+  }
+  print out
+}')"; then
+  case "$api_keys" in
+    [0-9]*) die "API key #$api_keys contains whitespace (keys are separated by newlines or commas)" ;;
+    *) die "cannot parse API_KEYS" ;;
+  esac
+fi
+unset api_keys_raw
+# Upstream treats a missing AUTH_MODE as none (`?? "none"` in dist/config.js): a stand whose .env lost
+# the line would come up without auth, so it must be set explicitly.
+[ -n "${AUTH_MODE+set}" ] || die "AUTH_MODE is not set: set AUTH_MODE=apikey (with API keys) or AUTH_MODE=none explicitly"
+case "$AUTH_MODE" in
+  none)
+    if [ -n "$api_keys" ]; then
+      log "WARNING: AUTH_MODE=none: API_KEYS are ignored, every request is accepted without an API key"
+    else
+      log "WARNING: AUTH_MODE=none: every request is accepted without an API key"
+    fi ;;
+  apikey)
+    [ -n "$api_keys" ] || die "AUTH_MODE=apikey but no API key is set (secrets/api_keys, API_KEYS_FILE or API_KEYS): the server would reject every request" ;;
+  *) die "AUTH_MODE must be none or apikey, got '${AUTH_MODE}' (the server would accept every request without an API key)" ;;
+esac
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

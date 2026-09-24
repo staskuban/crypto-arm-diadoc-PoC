@@ -21,6 +21,8 @@
 #                                  e-mail) or resets its password to a fresh random one (never printed),
 #                                  then logs in as it. The e-mail picks the certificate (CA stub mapping).
 #                                  Test stands only: it resets that user's password on every run.
+#                                  Refused when it is the admin's own account (its password would be
+#                                  lost: nothing saves the new one).
 #   CERT_FILE                      expected signer certificate (DER .cer),
 #                                  default docker/cryptoarm-server/certs/cryptoarm.server.test.cer
 #   DATA_FILE                      file to sign (e.g. an УПД .xml); default: generated text payload
@@ -91,11 +93,17 @@ expected_thumb="$(openssl x509 -inform DER -in "$cert_file" -noout -fingerprint 
 # 1. Log in.
 log "logging in at $base_url as $admin_login"
 login "$admin_login" "$admin_password_file"
+cp "$tmp/resp" "$tmp/admin-login"
 
 if [ -n "$signer_email" ]; then
   expect "$(request GET "/api/v1/users?filter=$(jq -rn --arg e "$signer_email" '{email: $e} | tojson | @uri')" \
     "$tmp/users")" 200 "user lookup" "$tmp/users"
   user_id="$(jq -r --arg e "$signer_email" '[.[] | select(.email == $e)][0].id // empty' "$tmp/users")"
+  # Resetting the admin's password would lock out secrets/admin_password (and DOCUMENTS_LOGIN=admin).
+  admin_id="$(jq -r '.userId // empty' "$tmp/admin-login" 2>/dev/null || true)" # local login answers {userId}
+  [ -n "$admin_id" ] || die "login as $admin_login returned no userId; cannot tell the admin from $signer_email"
+  [ "$user_id" != "$admin_id" ] ||
+    die "DOCUMENTS_SIGNER_EMAIL=$signer_email is the admin ($admin_login, id $admin_id); its password is never reset — sign as another e-mail, or unset DOCUMENTS_SIGNER_EMAIL to sign as the admin"
   openssl rand -hex 24 >"$tmp/signer-password"
   if [ -n "$user_id" ]; then
     jq -n --rawfile p "$tmp/signer-password" '{password: ($p | rtrimstr("\n"))}' >"$tmp/user.json"

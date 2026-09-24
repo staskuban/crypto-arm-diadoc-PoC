@@ -21,6 +21,14 @@ tool="$(basename "$0")"
 printf "%s\n" "$tool $*" >>"$FAKE_CALLS"
 # cpconfig -license -view prints the serial, as the real one does.
 [ "$tool $*" = "cpconfig -license -view" ] && printf 'License validity:\n%s\nExpires: 94 day(s)\nLicense type: Demo.\n' "${FAKE_SERIAL:-SERIAL-0000}"
+# The licence-setting calls echo the serial on stdout and stderr (worst case for the log), also
+# without its dashes.
+case "$tool $*" in
+  "cpconfig -license -set "* | "tsputil license -s "* | "ocsputil license -s "*)
+    for serial; do :; done
+    echo "License $serial accepted"
+    echo "serial: $(printf '%s' "$serial" | tr -d -)" >&2 ;;
+esac
 case "$tool $*" in
   *"${FAKE_FAIL_MATCH:-<never>}"*)
     pin=""
@@ -66,7 +74,7 @@ run_start() { # extra env assignments...
     CSP_STORE_DIR="$work/c/store" CSP_STORE_DEFAULT_DIR="$work/c/store_default" \
     CSP_CONFIG_DIR="$work/c/conf" CSP_CONFIG_DEFAULT_DIR="$work/c/conf_default" \
     CERTS_DIR="$work/c/certs" SECRETS_DIR="$work/c/secrets" TRUSTED_LICENSE_DIR="$work/c/lic" \
-    TRUSTED_LICENSE="" CRYPTOPRO_LICENSE="" \
+    TRUSTED_LICENSE="" CRYPTOPRO_LICENSE="" AUTH_MODE=none \
     "$@" "${TEST_SH:-sh}" "$start" child arg1 "arg two" >"$work/out" 2>&1
 }
 
@@ -164,6 +172,8 @@ else
   pass "a rejected CSP license fails the start"
 fi
 check "a rejected CSP license does not start the server" bash -c "! test -f '$work/child.env'"
+check "a rejected CSP license: the tool's output is logged" grep -q "0x80090020" "$work/out"
+check "a rejected CSP license: its value is not logged" bash -c "! grep -q BAD '$work/out'"
 
 reset
 printf 'CSP-LIC\r\n' >"$work/c/secrets/cryptopro_license"
@@ -176,6 +186,20 @@ check "the license type is still logged" grep -q "License type: Demo" "$work/out
 check "the server env has no *_FILE / OCSP / ROOT_CERTS variables" \
   bash -c "! grep -qE '^([A-Z_]+_FILE|CRYPTOPRO_OCSP_LICENSE|ROOT_CERTS_BASE64)=' '$work/child.env'"
 
+# 3a. The licence-setting tools may echo the serial: their output is logged redacted (R2 minor 26).
+reset
+printf '5050A-B0000-0CDEF-GHIJK-LMNOP\n' >"$work/c/secrets/cryptopro_license"
+printf 'TSP00-11111-22222\n' >"$work/c/secrets/cryptopro_tsp_license"
+printf 'OCSP0-33333-44444\n' >"$work/c/secrets/cryptopro_ocsp_license"
+run_start
+check "licence serials are not logged (CSP, TSP, OCSP; with or without dashes)" \
+  bash -c "! grep -qE '5050A|0CDEF|TSP00|22222|OCSP0|44444' '$work/out'"
+check "the licence tools' output is still logged, redacted" grep -q "License \*\*\* accepted" "$work/out"
+reset
+printf 'TSP00-11111-22222\n' >"$work/c/secrets/cryptopro_tsp_license"
+if run_start FAKE_FAIL_MATCH="tsputil license"; then fail "a rejected TSP license fails the start"; else pass "a rejected TSP license fails the start"; fi
+check "a rejected TSP license is not logged" bash -c "! grep -qE 'TSP00|22222' '$work/out'"
+
 # 4. API keys.
 reset
 printf 'key-one\nkey-two\n' >"$work/c/secrets/api_keys"
@@ -185,6 +209,45 @@ check "API_KEYS from file (one per line) reach the server comma-separated" \
 reset
 run_start API_KEYS="env-key"
 check "API_KEYS from env still work" test "$(child_env API_KEYS)" = "env-key"
+
+# 4a. API_KEYS normalisation (the server itself trims and drops empty keys: dist/config.js).
+reset
+printf '\n key-one \r\n,, key-two,\n\n' >"$work/c/secrets/api_keys"
+run_start AUTH_MODE=apikey
+check "API_KEYS: keys trimmed, empty ones dropped" test "$(child_env API_KEYS)" = "key-one,key-two"
+reset
+run_start AUTH_MODE=apikey API_KEYS=" env-a , ,env-b "
+check "API_KEYS from env: trimmed, empty ones dropped" test "$(child_env API_KEYS)" = "env-a,env-b"
+reset
+printf 'key one\n' >"$work/c/secrets/api_keys"
+if run_start AUTH_MODE=apikey; then fail "an API key with inner whitespace fails the start"; else pass "an API key with inner whitespace fails the start"; fi
+check "an API key with inner whitespace: the key is not logged" bash -c "! grep -q 'key one' '$work/out'"
+check "an API key with inner whitespace: explained" grep -q "API key #1 contains whitespace" "$work/out"
+
+# 4b. AUTH_MODE: upstream denies everything for apikey without keys and ALLOWS everything for any
+# value other than none / apikey (dist/middleware/apikey.middleware.js): both stop the start.
+reset
+printf '\n , \n' >"$work/c/secrets/api_keys"
+if run_start AUTH_MODE=apikey; then fail "AUTH_MODE=apikey without keys fails the start"; else pass "AUTH_MODE=apikey without keys fails the start"; fi
+check "AUTH_MODE=apikey without keys: explained" grep -q "AUTH_MODE=apikey but no API key" "$work/out"
+check "AUTH_MODE=apikey without keys: the server is not started" bash -c "! test -f '$work/child.env'"
+for mode in APIKEY api-key "apikey " basic ""; do
+  reset
+  if run_start AUTH_MODE="$mode" API_KEYS=k1; then fail "AUTH_MODE='$mode' fails the start"; else pass "AUTH_MODE='$mode' fails the start"; fi
+done
+check "an unknown AUTH_MODE: explained" grep -q "AUTH_MODE must be none or apikey" "$work/out"
+reset
+run_start AUTH_MODE=none API_KEYS=k1
+check "AUTH_MODE=none with keys: starts" child_ran
+check "AUTH_MODE=none with keys: warns that the keys are ignored" grep -q "WARNING: AUTH_MODE=none.*API_KEYS.*ignored" "$work/out"
+reset
+run_start
+check "AUTH_MODE=none without keys: starts with a warning" grep -q "WARNING: AUTH_MODE=none" "$work/out"
+# Unset AUTH_MODE means no auth upstream (`?? "none"`): a stand whose .env lost the line must not
+# come up open silently, so it has to be set explicitly.
+reset
+if run_start API_KEYS=k1 env -u AUTH_MODE; then fail "an unset AUTH_MODE fails the start"; else pass "an unset AUTH_MODE fails the start"; fi
+check "an unset AUTH_MODE: explained" grep -q "AUTH_MODE is not set" "$work/out"
 
 # 5. Root certificates.
 reset
