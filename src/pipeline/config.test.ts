@@ -35,6 +35,21 @@ describe('loadPipelineConfig', () => {
     );
   });
 
+  it.each(['DIADOC_FROM_BOX_ID', 'DIADOC_TO_BOX_ID'])(
+    'rejects the .env.example placeholder in %s (D20)',
+    (name) => {
+      expect(() => loadPipelineConfig({ ...base, [name]: ' changeme ' })).toThrow(
+        new PipelineConfigError(`${name} is still the placeholder`),
+      );
+    },
+  );
+
+  it('names the placeholder, not "must differ", when both box ids are changeme', () => {
+    expect(() =>
+      loadPipelineConfig({ DIADOC_FROM_BOX_ID: 'changeme', DIADOC_TO_BOX_ID: 'changeme' }),
+    ).toThrow(/DIADOC_FROM_BOX_ID is still the placeholder/);
+  });
+
   it('rejects equal boxes, a bad switch and bad numbers', () => {
     expect(() => loadPipelineConfig({ ...base, DIADOC_TO_BOX_ID: 'a@diadoc.ru' })).toThrow(
       /differ/,
