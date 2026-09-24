@@ -39,6 +39,33 @@ export function isTransientFetchError(error: unknown): boolean {
   return !(error.cause instanceof Error && error.cause.message === 'unexpected redirect');
 }
 
+/**
+ * Codes that only occur while a connection is being made (DNS, refused, connect timeout): the request
+ * did not leave, so the server cannot have acted on it. Not EHOSTUNREACH/ENETUNREACH: those can also
+ * hit a reused keep-alive socket after the body was sent.
+ */
+const CONNECT_PHASE_CODES: ReadonlySet<unknown> = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+/**
+ * A `fetch failed` whose cause is a connect-phase error. With several addresses (happy eyeballs)
+ * undici reports an AggregateError that carries the code of the attempts.
+ */
+export function isConnectPhaseError(error: unknown): boolean {
+  if (!(error instanceof TypeError) || error.message !== 'fetch failed') return false;
+  const { cause } = error;
+  return (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'code' in cause &&
+    CONNECT_PHASE_CODES.has(cause.code)
+  );
+}
+
 export interface RetryDeps {
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   now: () => number;

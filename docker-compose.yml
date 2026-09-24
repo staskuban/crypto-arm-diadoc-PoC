@@ -17,6 +17,10 @@ services:
       context: .
     image: ${APP_IMAGE:-kryptoarm-diadoc/app:local}
     init: true
+    # The first SIGTERM (`docker stop`, CI cancel) lets a running PostMessage finish: it ends within
+    # POST_MESSAGE_BUDGET_MS (180 s, src/diadoc/client.ts); the rest is margin to print the ids and
+    # remove the refresh-token lock. A SIGKILL before that loses both (R2 M2). Checked by src/cli.test.ts.
+    stop_grace_period: 200s
     depends_on:
       cryptoarm-server:
         condition: service_healthy

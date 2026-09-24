@@ -3,12 +3,15 @@ import type { AddressInfo } from 'node:net';
 
 import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 
-import { type AccessTokenProvider, RefreshTokenAuth } from './auth.js';
+import { type AccessTokenProvider, RefreshTokenAuth, type TokenRequestOptions } from './auth.js';
 import {
   DIADOC_HOSTS,
   DiadocClient,
   type DiadocClientOptions,
   findDocumentEntity,
+  POST_MESSAGE_BUDGET_MS,
+  POST_MIN_REQUEST_MS,
+  POST_PENDING_FALLBACK_MS,
   SHELF_MAX_BYTES,
   SHELF_UPLOAD_MAX_BYTES,
   SHELF_UPLOAD_MAX_ROUNDS,
@@ -57,7 +60,9 @@ class FakeAuth implements AccessTokenProvider {
   constructor(...tokens: string[]) {
     this.tokens = tokens;
   }
-  getAccessToken(): Promise<string> {
+  requests: (TokenRequestOptions | undefined)[] = [];
+  getAccessToken(o?: TokenRequestOptions): Promise<string> {
+    this.requests.push(o);
     return Promise.resolve(this.tokens[0] ?? 'none');
   }
   invalidated: string[] = [];
@@ -302,7 +307,9 @@ describe('DiadocClient.postMessage', () => {
     expect(await client.postMessage(message, { operationId: 'op-1' })).toEqual(posted);
 
     expect(calls).toHaveLength(3);
-    expect(slept).toEqual([2000, 1000]);
+    // Without Retry-After a 1 s pause would spend the attempts in seconds (R2 M2).
+    expect(POST_PENDING_FALLBACK_MS).toBeGreaterThanOrEqual(5000);
+    expect(slept).toEqual([2000, POST_PENDING_FALLBACK_MS]);
     expect(new Set(calls.map((c) => c.url.href)).size).toBe(1);
     expect(new Set(calls.map((c) => c.body)).size).toBe(1);
   });
@@ -318,6 +325,101 @@ describe('DiadocClient.postMessage', () => {
     expect(err).toBeInstanceOf(DiadocOperationPendingError);
     expect(err).toMatchObject({ operationId: 'op-1' });
     expect(calls).toHaveLength(2);
+  });
+
+  it('stops the 204 loop when the next pause would end at or past the time budget', async () => {
+    const clock = { t: 0 };
+    const pending = (): Response =>
+      new Response(null, { status: 204, headers: { 'retry-after': '60' } });
+    const { client, calls, slept } = makeClient([pending(), pending(), pending(), pending()], {
+      now: () => clock.t,
+      sleep: (ms) => {
+        slept.push(ms);
+        clock.t += ms;
+        return Promise.resolve();
+      },
+    });
+    const err = await client
+      .postMessage(message, { operationId: 'op-1', budgetMs: 180_000 })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocOperationPendingError);
+    expect((err as Error).message).toMatch(/op-1.*3 attempts.*180 s/);
+    expect(calls).toHaveLength(3);
+    expect(clock.t).toBe(120_000);
+  });
+
+  it('does not start a retry that would have less than the minimum time left', async () => {
+    const clock = { t: 0 };
+    const sleep = (ms: number): Promise<void> => {
+      clock.t += ms;
+      return Promise.resolve();
+    };
+    expect(POST_MIN_REQUEST_MS).toBe(5000);
+    // 503 without Retry-After: pauses 1 s, 2 s; the 4 s one would end past 10 s - 5 s.
+    const unavailable = makeClient(
+      [0, 1, 2, 3].map(() => new Response('unavailable', { status: 503 })),
+      { now: () => clock.t, sleep },
+    );
+    const err = await unavailable.client
+      .postMessage(message, { operationId: 'op', budgetMs: 10_000 })
+      .catch((e: unknown) => e);
+    expect(unavailable.calls).toHaveLength(3);
+    expect(err).toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect((err as Error).cause).toMatchObject({ status: 503 });
+
+    // Only 429s: the honest result is the last 429, not a budget error.
+    clock.t = 0;
+    const tooMany = makeClient(
+      [0, 1, 2].map(() => new Response('slow', { status: 429, headers: { 'retry-after': '3' } })),
+      { now: () => clock.t, sleep },
+    );
+    const err429 = await tooMany.client
+      .postMessage(message, { operationId: 'op', budgetMs: 10_000 })
+      .catch((e: unknown) => e);
+    expect(tooMany.calls).toHaveLength(2);
+    expect(err429).not.toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect(err429).toMatchObject({ status: 429 });
+  });
+
+  it('has a default time budget of a few minutes', () => {
+    expect(POST_MESSAGE_BUDGET_MS).toBeGreaterThanOrEqual(60_000);
+    expect(POST_MESSAGE_BUDGET_MS).toBeLessThanOrEqual(300_000);
+  });
+
+  it('cuts a hanging request at the end of the time budget: the outcome is unknown', async () => {
+    const hanging = (_input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal?.reason as Error);
+        });
+      });
+    const client = new DiadocClient({
+      environment: 'staging',
+      auth: new FakeAuth('AT'),
+      fetch: hanging,
+      timeoutMs: 60_000,
+    });
+    const started = Date.now();
+    const err = await client
+      .postMessage(message, { operationId: 'op-1', budgetMs: 50 })
+      .catch((e: unknown) => e);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(err).toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect((err as Error).cause).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('passes the budget deadline (and no signal) to the token provider', async () => {
+    const { client, auth } = makeClient([jsonResponse(posted)], { now: () => 1000 });
+    await client.postMessage(message, { operationId: 'op-1', budgetMs: 30_000 });
+    expect(auth.requests).toEqual([{ deadline: 31_000 }]);
+  });
+
+  it.each([0, -1, Number.NaN])('rejects budgetMs=%s without sending', async (budgetMs) => {
+    const { client, calls } = makeClient([]);
+    await expect(client.postMessage(message, { operationId: 'op', budgetMs })).rejects.toThrow(
+      /budgetMs/,
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it('maps 409 to DiadocConflictError with the response text', async () => {
@@ -848,6 +950,54 @@ describe('DiadocClient transient failures', () => {
     const err = await client.postMessage(message, { operationId: 'op' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DiadocError);
     expect(err).not.toBeInstanceOf(DiadocPostOutcomeUnknownError);
+  });
+
+  it('a PostMessage that never connected was not posted: no "may have been posted"', async () => {
+    const refused = (): TypeError =>
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+    const { calls, fetchFn } = flaky([refused(), refused(), refused(), refused()]);
+    const { client } = makeClient([], { fetch: fetchFn });
+    const err = await client.postMessage(message, { operationId: 'op' }).catch((e: unknown) => e);
+    expect(calls).toHaveLength(4);
+    expect(err).not.toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect(err).toMatchObject({ message: 'fetch failed' });
+  });
+
+  it('a refused connection after a lost response is still ambiguous', async () => {
+    const refused = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }),
+    });
+    const { fetchFn } = flaky([fetchFailed('ECONNRESET'), refused, refused, refused]);
+    const { client } = makeClient([], { fetch: fetchFn });
+    await expect(client.postMessage(message, { operationId: 'op' })).rejects.toBeInstanceOf(
+      DiadocPostOutcomeUnknownError,
+    );
+  });
+
+  it('CanPostMessage passes the abort signal to fetch and to the token provider', async () => {
+    const controller = new AbortController();
+    const { client, calls, auth } = makeClient([jsonResponse({ Errors: [] })]);
+    await client.canPostMessage(
+      { FromBoxId: 'a', ToBoxId: 'b', DocumentPrototypes: [] },
+      { signal: controller.signal },
+    );
+    expect(auth.requests).toEqual([{ signal: controller.signal }]);
+    controller.abort(new Error('stop'));
+    expect(calls[0]?.init.signal?.aborted).toBe(true);
+  });
+
+  it('getDocument passes its deadline and signal to the token provider', async () => {
+    const controller = new AbortController();
+    const { client, auth } = makeClient([jsonResponse({})]);
+    await client.getDocument(
+      { boxId: 'b', messageId: 'm', entityId: 'e' },
+      { deadline: 5000, signal: controller.signal },
+    );
+    expect(auth.requests).toEqual([{ deadline: 5000, signal: controller.signal }]);
   });
 
   it('a 409 after a lost response stays a conflict', async () => {

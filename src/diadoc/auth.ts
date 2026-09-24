@@ -21,9 +21,25 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_LIFETIME_S = 300;
 const MAX_BODY_IN_MESSAGE = 300;
 
+/** Bounds for a token refresh made on behalf of one API call. */
+export interface TokenRequestOptions {
+  /**
+   * Stops a refresh before its first request and in its retry pauses; the call then rejects with the
+   * signal's reason. A token request already sent is never cut: its answer may carry a rotated refresh
+   * token that has to reach the disk (the old one may be dead already).
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * Absolute time (per the provider's clock) a refresh must end by: a token request (with its full
+   * timeout) is only started when it can finish before it, and no pause runs past that point. A cached
+   * token is returned regardless.
+   */
+  deadline?: number | undefined;
+}
+
 /** Anything that can hand out a Bearer token. */
 export interface AccessTokenProvider {
-  getAccessToken(): Promise<string>;
+  getAccessToken(o?: TokenRequestOptions): Promise<string>;
   /**
    * The API rejected `accessToken` (401): forget it if it is still the cached one. Passing the rejected
    * token keeps late 401s from wiping a token that was refreshed in the meantime.
@@ -54,7 +70,7 @@ export interface RefreshTokenAuthOptions {
    */
   retry?: Partial<RetryPolicy>;
   fetch?: typeof fetch;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
 }
 
@@ -73,7 +89,7 @@ export class RefreshTokenAuth implements AccessTokenProvider {
   private readonly timeoutMs: number;
   private readonly onRefreshTokenRotated: RefreshTokenAuthOptions['onRefreshTokenRotated'];
   private readonly fetchFn: typeof fetch;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly now: () => number;
   private readonly retry: Readonly<RetryPolicy>;
 
@@ -90,16 +106,21 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     this.timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.onRefreshTokenRotated = o.onRefreshTokenRotated;
     this.fetchFn = o.fetch ?? fetch;
-    this.sleep = o.sleep ?? ((ms) => delay(ms));
+    this.sleep =
+      o.sleep ?? ((ms, signal) => delay(ms, undefined, signal === undefined ? {} : { signal }));
     this.now = o.now ?? Date.now;
     this.retry = { ...DEFAULT_RETRY_POLICY, ...o.retry };
   }
 
-  getAccessToken(): Promise<string> {
+  /**
+   * A call that finds a refresh already running waits for it: the refresh runs under the options of
+   * the call that started it.
+   */
+  getAccessToken(o: TokenRequestOptions = {}): Promise<string> {
     if (this.cached && this.now() < this.cached.refreshAt) {
       return Promise.resolve(this.cached.accessToken);
     }
-    this.inFlight ??= this.refresh().finally(() => {
+    this.inFlight ??= this.refresh(o).finally(() => {
       this.inFlight = undefined;
     });
     return this.inFlight;
@@ -109,8 +130,19 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     if (this.cached?.accessToken === accessToken) this.cached = undefined;
   }
 
-  private async refresh(): Promise<string> {
+  private async refresh(o: TokenRequestOptions): Promise<string> {
+    const { signal, deadline } = o;
+    signal?.throwIfAborted();
     const startedAt = this.now();
+    // The last moment a request with the full timeout can start and still end by the deadline.
+    const lastStart = deadline === undefined ? undefined : deadline - this.timeoutMs;
+    if (lastStart !== undefined && startedAt > lastStart) {
+      throw new DiadocAuthError(
+        `Token endpoint ${this.tokenUrl} not asked: a token request (up to ` +
+          `${String(this.timeoutMs / 1000)} s) would not end before the deadline of the API call`,
+        0,
+      );
+    }
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: this.clientId,
@@ -130,12 +162,15 @@ export class RefreshTokenAuth implements AccessTokenProvider {
             body,
             // A 3xx to another host would carry client_secret and refresh_token there.
             redirect: 'error',
+            // Not the caller's signal: see TokenRequestOptions.signal.
             signal: AbortSignal.timeout(this.timeoutMs),
           }),
         this.retry,
-        { sleep: this.sleep, now: this.now },
+        { sleep: this.sleep, now: this.now, signal, deadline: lastStart },
       );
     } catch (error) {
+      // An aborted pause rejects with its own AbortError.
+      if (signal?.aborted) throw signal.reason;
       if (!isTransientFetchError(error)) throw error;
       // A DiadocAuthError, so callers that retry on network errors do not repeat the whole loop.
       const reason = error instanceof Error && error.cause instanceof Error ? error.cause : error;

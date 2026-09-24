@@ -24,4 +24,10 @@ describe('retryAfterMs', () => {
     expect(retryAfterMs('3600', now)).toBe(60_000);
     expect(retryAfterMs('3600', now, 5000)).toBe(5000);
   });
+
+  it('takes the fallback from the caller', () => {
+    expect(retryAfterMs(null, now, 60_000, 5000)).toBe(5000);
+    expect(retryAfterMs('soon', now, 60_000, 5000)).toBe(5000);
+    expect(retryAfterMs('2', now, 60_000, 5000)).toBe(2000);
+  });
 });

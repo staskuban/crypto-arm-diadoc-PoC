@@ -11,10 +11,11 @@ import {
 import {
   DEFAULT_RETRY_POLICY,
   fetchWithRetry,
+  isConnectPhaseError,
   isTransientFetchError,
   type RetryPolicy,
 } from './http-retry.js';
-import { retryAfterMs } from './retry-after.js';
+import { MAX_RETRY_AFTER_MS, retryAfterMs } from './retry-after.js';
 import type {
   DocflowStatus,
   Document,
@@ -70,7 +71,30 @@ export interface PostMessageOptions {
   operationId: string;
   /** Attempts while Diadoc answers 204 (still processing). Default 10. */
   maxAttempts?: number;
+  /**
+   * Wall-clock time for the whole call: 204 rounds, retries, their pauses, token refreshes and each
+   * request's timeout all end within it. Default POST_MESSAGE_BUDGET_MS.
+   */
+  budgetMs?: number;
 }
+
+/**
+ * Default PostMessage time budget. The CLI does not interrupt PostMessage on the first signal, so
+ * `stop_grace_period` of the `app` service (root docker-compose.yml) must exceed it.
+ */
+export const POST_MESSAGE_BUDGET_MS = 180_000;
+
+/**
+ * Pause after a PostMessage 204 without a usable Retry-After (R2 M2): 1 s would spend all attempts
+ * in seconds and turn a slow operation into a re-run.
+ */
+export const POST_PENDING_FALLBACK_MS = 5_000;
+
+/**
+ * No PostMessage request (first attempt aside) starts with less of the budget left: it would be cut
+ * almost at once after its body left, turning a plain 429/503 into "may have been posted".
+ */
+export const POST_MIN_REQUEST_MS = 5_000;
 
 export interface ShelfUploadOptions {
   /** With the dot, e.g. `.xml`: only affects the name of a downloaded file. */
@@ -107,6 +131,15 @@ type Body = { data: string; type: string } | { data: Buffer; type: string };
 /** Set once a PostMessage request may have reached Diadoc without us learning the outcome. */
 interface Uncertainty {
   maybeReceived: boolean;
+}
+
+interface SendOptions extends RequestOptions {
+  uncertainty?: Uncertainty;
+  /**
+   * The deadline also cuts each request, and a retry only starts with POST_MIN_REQUEST_MS left
+   * (PostMessage's budget).
+   */
+  hardDeadline?: boolean;
 }
 
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
@@ -152,8 +185,12 @@ export class DiadocClient {
     return this.getJson('/V3/GetDocumentTypes', { boxId });
   }
 
-  async canPostMessage(prototype: MessagePrototype): Promise<MessageValidationResult> {
-    const res = await this.send('POST', '/CanPostMessage', {}, json(prototype));
+  /** A read: the signal may abort it at any time. */
+  async canPostMessage(
+    prototype: MessagePrototype,
+    o: RequestOptions = {},
+  ): Promise<MessageValidationResult> {
+    const res = await this.send('POST', '/CanPostMessage', {}, json(prototype), o);
     return readJson<MessageValidationResult>(res, 'POST', '/CanPostMessage');
   }
 
@@ -161,7 +198,9 @@ export class DiadocClient {
    * V3/PostMessage. The body is serialized once and every repeat sends the identical bytes with the
    * same operationId: `204` + `Retry-After` (still running), 429, 5xx, network errors and timeouts
    * (see `retry`). `409` (duplicate or forbidden by the recipient) becomes DiadocConflictError. Any
-   * other failure after a request whose outcome is unknown becomes DiadocPostOutcomeUnknownError.
+   * other failure after a request whose outcome is unknown becomes DiadocPostOutcomeUnknownError; a
+   * request that never connected (refused, DNS) is not one. Everything ends within `budgetMs`; a 204
+   * whose next pause would reach it ends as DiadocOperationPendingError.
    */
   async postMessage(message: MessageToPost, o: PostMessageOptions): Promise<Message> {
     if (o.operationId === '') throw new Error('PostMessage needs a non-empty operationId');
@@ -171,6 +210,11 @@ export class DiadocClient {
         `PostMessage maxAttempts must be an integer >= 1, got ${String(maxAttempts)}`,
       );
     }
+    const budgetMs = o.budgetMs ?? POST_MESSAGE_BUDGET_MS;
+    if (!(budgetMs > 0)) {
+      throw new Error(`PostMessage budgetMs must be > 0, got ${String(budgetMs)}`);
+    }
+    const deadline = this.now() + budgetMs;
     const path = '/V3/PostMessage';
     const body = json(toWireMessage(message));
     const uncertainty: Uncertainty = { maybeReceived: false };
@@ -178,16 +222,35 @@ export class DiadocClient {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const res = await this.send('POST', path, { operationId: o.operationId }, body, {
           uncertainty,
+          deadline,
+          hardDeadline: true,
         });
         // Any 2xx (204 included) means Diadoc took the request.
         uncertainty.maybeReceived = true;
         if (res.status !== 204) return await readJson<Message>(res, 'POST', path);
         if (attempt < maxAttempts) {
-          await this.sleep(retryAfterMs(res.headers.get('retry-after'), this.now()));
+          const now = this.now();
+          const pause = retryAfterMs(
+            res.headers.get('retry-after'),
+            now,
+            MAX_RETRY_AFTER_MS,
+            POST_PENDING_FALLBACK_MS,
+          );
+          // A pause must leave time for the next request.
+          if (now + pause > deadline - POST_MIN_REQUEST_MS) {
+            throw new DiadocOperationPendingError(o.operationId, attempt, budgetMs);
+          }
+          await this.sleep(pause);
         }
       }
     } catch (error) {
-      if (!uncertainty.maybeReceived || error instanceof DiadocConflictError) throw error;
+      if (
+        !uncertainty.maybeReceived ||
+        error instanceof DiadocConflictError ||
+        error instanceof DiadocOperationPendingError
+      ) {
+        throw error;
+      }
       throw new DiadocPostOutcomeUnknownError(o.operationId, error);
     }
     throw new DiadocOperationPendingError(o.operationId, maxAttempts);
@@ -305,45 +368,57 @@ export class DiadocClient {
   /**
    * Repeats transient failures per `retry` and retries once per call on 401 with a fresh token (the
    * cached one may have been revoked). Never follows redirects: a 3xx to another host would carry
-   * the request body (the signed document) there.
+   * the request body (the signed document) there. The deadline and signal also bound a token refresh.
    */
   private async send(
     method: string,
     path: string,
     query: Query,
     body?: Body,
-    o: RequestOptions & { uncertainty?: Uncertainty } = {},
+    o: SendOptions = {},
   ): Promise<Response> {
     const url = new URL(this.baseUrl + path);
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
-    const { signal, uncertainty } = o;
+    const { signal, deadline, uncertainty } = o;
+    const hardDeadline = o.hardDeadline === true ? deadline : undefined;
 
     let refreshed = false;
     const fetchTracked = async (token: string): Promise<Response> => {
       try {
-        const res = await this.fetchOnce(method, url, token, body, signal);
+        const res = await this.fetchOnce(method, url, token, body, signal, hardDeadline);
         if (res.status >= 500 && uncertainty) uncertainty.maybeReceived = true;
         return res;
       } catch (error) {
-        if (uncertainty && !signal?.aborted && isTransientFetchError(error)) {
+        if (
+          uncertainty &&
+          !signal?.aborted &&
+          isTransientFetchError(error) &&
+          !isConnectPhaseError(error)
+        ) {
           uncertainty.maybeReceived = true;
         }
         throw error;
       }
     };
+    const tokenOptions = { signal, deadline };
     const res = await fetchWithRetry(
       async () => {
         signal?.throwIfAborted();
-        const token = await this.auth.getAccessToken();
+        const token = await this.auth.getAccessToken(tokenOptions);
         const first = await fetchTracked(token);
         if (first.status !== 401 || !this.auth.invalidate || refreshed) return first;
         refreshed = true;
         await first.body?.cancel().catch(() => undefined);
         this.auth.invalidate(token);
-        return fetchTracked(await this.auth.getAccessToken());
+        return fetchTracked(await this.auth.getAccessToken(tokenOptions));
       },
       this.retry,
-      { sleep: this.sleep, now: this.now, signal, deadline: o.deadline },
+      {
+        sleep: this.sleep,
+        now: this.now,
+        signal,
+        deadline: hardDeadline === undefined ? deadline : hardDeadline - POST_MIN_REQUEST_MS,
+      },
     );
     if (res.ok) return res;
 
@@ -358,13 +433,18 @@ export class DiadocClient {
     token: string,
     body: Body | undefined,
     signal: AbortSignal | undefined,
+    deadline: number | undefined,
   ): Promise<Response> {
+    const left = deadline === undefined ? this.timeoutMs : deadline - this.now();
+    // Not transient: nothing is sent, so fetchWithRetry stops here.
+    if (left <= 0)
+      return Promise.reject(new Error(`no time left before the deadline for ${url.pathname}`));
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
       accept: JSON_CONTENT_TYPE,
     };
     if (body !== undefined) headers['content-type'] = body.type;
-    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const timeout = AbortSignal.timeout(Math.min(this.timeoutMs, left));
     return this.fetchFn(url.href, {
       method,
       headers,
