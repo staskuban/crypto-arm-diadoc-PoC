@@ -182,9 +182,12 @@ function describeFailure(error: unknown): string {
 const entry = process.argv[1];
 if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
   const controller = new AbortController();
-  process.once('SIGINT', () => {
-    controller.abort(new Error('interrupted'));
-  });
+  // SIGTERM is how `docker stop` ends the container: abort so a posted message still reports its ids.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      controller.abort(new Error(`interrupted (${signal})`));
+    });
+  }
   process.exitCode = await main(process.argv.slice(2), {
     env: process.env,
     readFile: (path) => fsReadFile(path),
