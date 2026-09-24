@@ -2,15 +2,27 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+.DS_Store
 
-# Secrets
+# Secrets and local environment
 .env
 .env.*
 !.env.example
 *.pfx
 *.p12
 
-# КриптоПро CSP distribution (downloaded manually)
+# КриптоАРМ Server: human-downloaded CSP distribution, CSP key store, fetched test certs
 cryptopro/*.tgz
+docker/cryptoarm-server/cryptopro/*
+!docker/cryptoarm-server/cryptopro/.gitkeep
+docker/cryptoarm-server/cert_storage/
+docker/cryptoarm-server/certs/**/*.cer
 
-.DS_Store
+# Other key/cert material and КриптоПро key containers
+*.key
+*.pem
+*.crt
+*.der
+*.p7b
+*.000/
+*.tmp

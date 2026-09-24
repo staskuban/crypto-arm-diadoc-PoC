@@ -33,7 +33,9 @@ Only public APIs of both systems are used. No database — state lives in Кри
   - unit tests (Vitest): `npm test`; watch: `npm run test:watch`
   - single test: `npm test -- src/scaffold.test.ts -t "resolves every"` (file path and/or `-t <name pattern>`)
   - integration tests: *(planned — T6)*
-  - local environment: `docker compose up` (root `docker-compose.yml`; the КриптоАРМ Server service is `include`d from `docker/cryptoarm-server` once I1 is merged).
+  - local environment: `docker compose up` (root `docker-compose.yml`; the КриптоАРМ Server service is `include`d from `docker/cryptoarm-server`).
+  - КриптоАРМ Server: smoke `scripts/smoke-server.sh`; shell tests `scripts/test/*.test.sh`.
+- КриптоАРМ Server stand (details): `docker/cryptoarm-server/` (see its README); smoke `scripts/smoke-server.sh`; shell tests `scripts/test/*.test.sh`.
 
 ## Development workflow (Orca worktrees)
 
@@ -64,8 +66,9 @@ Git: default branch is `master` (not `main`). The stash stack is shared across w
 - Default port `3037`, Swagger at `/docs`. Auth via `AUTH_MODE=none|apikey` + `API_KEYS`; key passed as `X-API-Key`, `Authorization: Bearer`, or `?apiKey=`.
 - Signing: `POST /cms/sign` with `{ cert, data, password?, detached?, cadesStandard? }` (Base64) → `{ cms }`. `detached` defaults to **true**, `cadesStandard` to `CAdES-BES`. Also `/cms/verify`, `/cert/verify`, `/hash`, `/cms/attached-to-detached`.
 - Keys stay on the server: install PFX at container start (`/certs/user/*.pfx`, or `CERT_PFX_BASE64` + `CERT_PFX_PIN`; roots in `/certs/root`), then pass only the public `.cer` as `cert` — the key is found in `uMy` by thumbprint. Passing a `.pfx` also works but installs it temporarily per request. Test cert/key from CRYPTO-PRO Test Center 2 ship in the upstream repo `certs/`.
-- `.env` needs `TRUSTED_LICENSE` (КриптоАРМ Server test key — provided by the user, keep it only in the untracked `.env`) and `CRYPTOPRO_LICENSE`.
-- **Manual prerequisite**: КриптоПро CSP 5.0 `linux-amd64_deb.tgz` must be downloaded by a human (requires cryptopro.ru login) into `cryptopro/`. Image is x86_64 only — on Apple Silicon it runs under emulation.
+- `.env`: `CRYPTOPRO_LICENSE` may be empty (CSP Demo trial). `TRUSTED_LICENSE` is **required** — without it the server exits `Trusted Crypto license is invalid` (verified 2026-09-24). Keep real licenses only in the untracked `.env`.
+- **Manual prerequisites**: КриптоПро CSP 5.0 `linux-amd64_deb.tgz` downloaded by a human (cryptopro.ru login) into `docker/cryptoarm-server/cryptopro/`, and a `TRUSTED_LICENSE` key. Image is x86_64 only — on Apple Silicon it runs under emulation (build ~30 s once the base image is cached).
+- Test cert `CN=cryptoarm.server.test` and its CA root expire **2026-10-28**. Upstream `crypto.root.test.cer` is byte-identical to the leaf and does not work as a root: `/cms/verify` then returns `isValidSign=false` (chain), so `scripts/fetch-test-certs.sh` installs the real test CA root from the cert's AIA URL instead. `isValidSign` includes the chain; the pure math result is `signs[].extVerifyInfo.mathValidity`.
 
 ### Контур.Диадок API
 - Docs: https://developer.kontur.ru/doc/diadoc-api/index.html (has an OpenAPI spec and SDKs linked from there).
