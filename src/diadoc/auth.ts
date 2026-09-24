@@ -1,11 +1,24 @@
 // OIDC Refresh Token Flow against identity.kontur.ru (developer.kontur.ru/doc/diadoc-api/authentication.html).
 // One IdP for prod and staging: the scope (Diadoc.PublicAPI[.Staging]) is fixed when the refresh token
 // is issued in the integrator cabinet, so the refresh request carries no scope.
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { DiadocAuthError } from './errors.js';
+import {
+  DEFAULT_RETRY_POLICY,
+  fetchWithRetry,
+  isTransientFetchError,
+  type RetryPolicy,
+} from './http-retry.js';
 
 export const DEFAULT_TOKEN_URL = 'https://identity.kontur.ru/connect/token';
 const DEFAULT_EXPIRY_MARGIN_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Assumed lifetime when the IdP sends no `expires_in`: short, but not a refresh (and a possible
+ * token-file write) on every API call.
+ */
+const DEFAULT_LIFETIME_S = 300;
 const MAX_BODY_IN_MESSAGE = 300;
 
 /** Anything that can hand out a Bearer token. */
@@ -34,7 +47,14 @@ export interface RefreshTokenAuthOptions {
   expiryMarginMs?: number;
   /** Per token request. Default 30 s. */
   timeoutMs?: number;
+  /**
+   * Repeats of the identical token request on 429 (Retry-After), 408, 5xx, network errors and
+   * timeouts. A lost response may have rotated the refresh token already; repeating with the old one
+   * is still the only chance to get a token.
+   */
+  retry?: Partial<RetryPolicy>;
   fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
 
@@ -53,7 +73,9 @@ export class RefreshTokenAuth implements AccessTokenProvider {
   private readonly timeoutMs: number;
   private readonly onRefreshTokenRotated: RefreshTokenAuthOptions['onRefreshTokenRotated'];
   private readonly fetchFn: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly retry: Readonly<RetryPolicy>;
 
   private refreshToken: string;
   private cached: { accessToken: string; refreshAt: number } | undefined;
@@ -68,7 +90,9 @@ export class RefreshTokenAuth implements AccessTokenProvider {
     this.timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.onRefreshTokenRotated = o.onRefreshTokenRotated;
     this.fetchFn = o.fetch ?? fetch;
+    this.sleep = o.sleep ?? ((ms) => delay(ms));
     this.now = o.now ?? Date.now;
+    this.retry = { ...DEFAULT_RETRY_POLICY, ...o.retry };
   }
 
   getAccessToken(): Promise<string> {
@@ -87,62 +111,84 @@ export class RefreshTokenAuth implements AccessTokenProvider {
 
   private async refresh(): Promise<string> {
     const startedAt = this.now();
-    const res = await this.fetchFn(this.tokenUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        accept: 'application/json',
-      },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        refresh_token: this.refreshToken,
-      }).toString(),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      refresh_token: this.refreshToken,
+    }).toString();
+    let res: Response;
+    try {
+      res = await fetchWithRetry(
+        () =>
+          this.fetchFn(this.tokenUrl, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/x-www-form-urlencoded',
+              accept: 'application/json',
+            },
+            body,
+            // A 3xx to another host would carry client_secret and refresh_token there.
+            redirect: 'error',
+            signal: AbortSignal.timeout(this.timeoutMs),
+          }),
+        this.retry,
+        { sleep: this.sleep, now: this.now },
+      );
+    } catch (error) {
+      if (!isTransientFetchError(error)) throw error;
+      // A DiadocAuthError, so callers that retry on network errors do not repeat the whole loop.
+      const reason = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+      throw new DiadocAuthError(
+        `Token endpoint ${this.tokenUrl} unreachable: ${reason instanceof Error ? reason.message : String(reason)}`,
+        0,
+        undefined,
+        { cause: error },
+      );
+    }
     const text = await res.text();
-    const body = parseJson(text);
+    const json = parseJson(text);
 
     if (!res.ok) {
-      const oauthError = typeof body?.error === 'string' ? body.error : undefined;
+      const oauthError = typeof json?.error === 'string' ? json.error : undefined;
       throw new DiadocAuthError(
         `Token endpoint ${this.tokenUrl} -> ${String(res.status)}: ${text.slice(0, MAX_BODY_IN_MESSAGE)}`,
         res.status,
         oauthError,
       );
     }
-    if (!body) {
+    if (!json) {
       throw new DiadocAuthError(
         `Token endpoint returned non-JSON (${String(res.status)}): ${text.slice(0, MAX_BODY_IN_MESSAGE)}`,
         res.status,
       );
     }
-    if (typeof body.access_token !== 'string' || body.access_token === '') {
+    if (typeof json.access_token !== 'string' || json.access_token === '') {
       throw new DiadocAuthError('Token endpoint returned no access_token', res.status);
     }
 
-    if (typeof body.refresh_token === 'string' && body.refresh_token !== '') {
-      const rotated = body.refresh_token !== this.refreshToken;
+    if (typeof json.refresh_token === 'string' && json.refresh_token !== '') {
+      const rotated = json.refresh_token !== this.refreshToken;
       // Remember it before the callback: once rotated, the old one may already be dead.
-      this.refreshToken = body.refresh_token;
+      this.refreshToken = json.refresh_token;
       // Cache the access token only after a successful persist, so a failed persist is retried
       // on the next call instead of being hidden behind a day-long cached token.
-      if (rotated) await this.onRefreshTokenRotated?.(body.refresh_token);
+      if (rotated) await this.onRefreshTokenRotated?.(json.refresh_token);
     }
 
-    // Without a usable lifetime the token is used for this call only.
     this.cached = {
-      accessToken: body.access_token,
-      refreshAt: startedAt + expiresInSeconds(body.expires_in) * 1000 - this.expiryMarginMs,
+      accessToken: json.access_token,
+      refreshAt: startedAt + expiresInSeconds(json.expires_in) * 1000 - this.expiryMarginMs,
     };
-    return body.access_token;
+    return json.access_token;
   }
 }
 
+/** Missing or unreadable → DEFAULT_LIFETIME_S; zero or negative → not cached. */
 function expiresInSeconds(value: unknown): number {
-  const n = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : value;
-  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
+  const n = typeof value === 'string' && /^-?\d+$/.test(value.trim()) ? Number(value) : value;
+  if (typeof n !== 'number' || !Number.isFinite(n)) return DEFAULT_LIFETIME_S;
+  return Math.max(n, 0);
 }
 
 function parseJson(text: string): TokenResponse | undefined {

@@ -43,14 +43,35 @@ export class DiadocOperationPendingError extends Error {
   }
 }
 
+/**
+ * PostMessage failed after at least one request whose outcome is unknown (lost response, timeout,
+ * 5xx, 204 "in progress", a 2xx that could not be read): Diadoc may have created the message. Look it
+ * up by `operationId` before posting again with a different body.
+ */
+export class DiadocPostOutcomeUnknownError extends Error {
+  readonly operationId: string;
+
+  constructor(operationId: string, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `Diadoc PostMessage operation ${operationId} failed, but the message may have been posted: ` +
+        reason.slice(0, MAX_BODY_IN_MESSAGE),
+      { cause },
+    );
+    this.name = 'DiadocPostOutcomeUnknownError';
+    this.operationId = operationId;
+  }
+}
+
 /** Token endpoint failure. Never carries client_secret or refresh_token. */
 export class DiadocAuthError extends Error {
+  /** 0 when the token endpoint could not be reached. */
   readonly status: number;
   /** OAuth `error` field, e.g. `invalid_client`, `invalid_grant`. */
   readonly oauthError: string | undefined;
 
-  constructor(message: string, status: number, oauthError?: string) {
-    super(message);
+  constructor(message: string, status: number, oauthError?: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'DiadocAuthError';
     this.status = status;
     this.oauthError = oauthError;

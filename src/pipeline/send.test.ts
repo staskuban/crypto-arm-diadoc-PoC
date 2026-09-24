@@ -7,6 +7,7 @@ import {
   DiadocConflictError,
   DiadocError,
   DiadocOperationPendingError,
+  DiadocPostOutcomeUnknownError,
   SHELF_UPLOAD_MAX_BYTES,
   type DocflowStatus,
   type Document,
@@ -16,6 +17,7 @@ import {
   type MessageToPost,
   type MessageValidationResult,
   type PostMessageOptions,
+  type RequestOptions,
   type ShelfUploadOptions,
 } from '../diadoc/index.js';
 import {
@@ -90,6 +92,8 @@ class FakeDiadoc implements PipelineDiadoc {
   uploads: { content: Buffer; options: ShelfUploadOptions | undefined }[] = [];
   posts: { message: MessageToPost; options: PostMessageOptions }[] = [];
   refs: DocumentRef[] = [];
+  getOptions: (RequestOptions | undefined)[] = [];
+  onGetDocument: (() => Promise<Document>) | undefined;
 
   canPostResult: MessageValidationResult | Error = { Errors: [] };
   shelfResult: string | Error = 'dd-api-shelf';
@@ -115,9 +119,11 @@ class FakeDiadoc implements PipelineDiadoc {
     return settle(this.postResult);
   }
 
-  getDocument(ref: DocumentRef): Promise<Document> {
+  getDocument(ref: DocumentRef, options?: RequestOptions): Promise<Document> {
     this.calls.push('getDocument');
     this.refs.push(ref);
+    this.getOptions.push(options);
+    if (this.onGetDocument) return this.onGetDocument();
     const next = this.documents.length > 1 ? this.documents.shift() : this.documents[0];
     return settle(next ?? new Error('no document'));
   }
@@ -396,7 +402,32 @@ describe('sendUtd PostMessage failures', () => {
   it('wraps any other PostMessage failure', async () => {
     const { diadoc, run } = setup();
     diadoc.postResult = new DiadocError('POST', '/V3/PostMessage', 400, 'bad signature');
-    expect(await failure(run())).toMatchObject({ code: 'POST_FAILED', step: 'post' });
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'POST_FAILED', step: 'post' });
+    expect(error.message).not.toMatch(/may have been posted/);
+  });
+
+  it('says an ambiguous PostMessage failure may have been posted', async () => {
+    const { diadoc, run } = setup();
+    const operationId = operationIdFor(FROM, TO, FILE_NAME, CONTENT);
+    diadoc.postResult = new DiadocPostOutcomeUnknownError(
+      operationId,
+      new DiadocError('POST', '/V3/PostMessage', 502, 'bad gateway'),
+    );
+    const error = await failure(run());
+    expect(error).toMatchObject({ code: 'POST_FAILED', step: 'post', operationId });
+    expect(error.message).toMatch(/may have been posted/);
+    expect(error.message).toMatch(/502/);
+    expect(error.message).toMatch(/before sending again/);
+  });
+
+  it('truncates a long 409 body in the message', async () => {
+    const { diadoc, run } = setup();
+    const body = `duplicate ${'x'.repeat(10_000)}`;
+    diadoc.postResult = new DiadocConflictError('POST', '/V3/PostMessage', body);
+    const error = await failure(run());
+    expect(error.code).toBe('ALREADY_SENT');
+    expect(error.message.length).toBeLessThan(1100);
   });
 
   it('reports a PostMessage still in progress as POST_PENDING (retry is safe)', async () => {
@@ -523,6 +554,29 @@ describe('sendUtd status polling', () => {
       { fromBoxId: FROM, toBoxId: TO, signal: controller.signal },
     );
     expect(result).toMatchObject({ messageId: 'msg-1', polls: 1, outcome: 'pending' });
+  });
+
+  it('gives GetDocument the polling deadline and the abort signal', async () => {
+    const controller = new AbortController();
+    const { diadoc, run } = setup({ signal: controller.signal });
+    diadoc.documents = [{ DocflowStatus: status('Success') }];
+    await run();
+    expect(diadoc.getOptions).toEqual([
+      { deadline: 1_000_000 + 10_000, signal: controller.signal },
+    ]);
+  });
+
+  it('an abort during GetDocument ends polling without a statusError', async () => {
+    const controller = new AbortController();
+    const { diadoc, run } = setup({ signal: controller.signal });
+    const reason = new Error('stop');
+    diadoc.onGetDocument = () => {
+      controller.abort(reason);
+      return Promise.reject(reason);
+    };
+    const result = await run();
+    expect(result).toMatchObject({ messageId: 'msg-1', polls: 1, outcome: 'pending' });
+    expect(result.statusError).toBeUndefined();
   });
 
   it('with timeoutMs 0 reads the status exactly once', async () => {

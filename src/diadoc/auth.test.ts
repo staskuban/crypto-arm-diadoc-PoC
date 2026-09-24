@@ -30,18 +30,24 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 function makeAuth(
   responses: Response[],
   overrides: Partial<RefreshTokenAuthOptions> = {},
-): { auth: RefreshTokenAuth; calls: Call[]; clock: { t: number } } {
+): { auth: RefreshTokenAuth; calls: Call[]; clock: { t: number }; slept: number[] } {
   const { calls, fetchFn } = fakeFetch(responses);
   const clock = { t: 1_000_000 };
+  const slept: number[] = [];
   const auth = new RefreshTokenAuth({
     clientId: 'CID',
     clientSecret: 'SECRET',
     refreshToken: 'RT0',
     fetch: fetchFn,
     now: () => clock.t,
+    sleep: (ms) => {
+      slept.push(ms);
+      clock.t += ms;
+      return Promise.resolve();
+    },
     ...overrides,
   });
-  return { auth, calls, clock };
+  return { auth, calls, clock, slept };
 }
 
 const tokenResponse = (access: string, refresh?: string, expiresIn: number | null = 3600) =>
@@ -101,14 +107,56 @@ describe('RefreshTokenAuth', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('does not cache a token without expires_in', async () => {
+  it('without expires_in assumes a 5 minute lifetime (not a refresh per call)', async () => {
+    const { auth, calls, clock } = makeAuth(
+      [tokenResponse('AT1', undefined, null), tokenResponse('AT2', undefined, null)],
+      { expiryMarginMs: 60_000 },
+    );
+    expect(await auth.getAccessToken()).toBe('AT1');
+    clock.t += 240_000 - 1;
+    expect(await auth.getAccessToken()).toBe('AT1');
+    expect(calls).toHaveLength(1);
+    clock.t += 1;
+    expect(await auth.getAccessToken()).toBe('AT2');
+  });
+
+  it.each([0, -5])('does not cache a token with expires_in %s', async (expiresIn) => {
     const { auth, calls } = makeAuth([
-      tokenResponse('AT1', undefined, null),
-      tokenResponse('AT2', undefined, null),
+      tokenResponse('AT1', undefined, expiresIn),
+      tokenResponse('AT2', undefined, expiresIn),
     ]);
     expect(await auth.getAccessToken()).toBe('AT1');
     expect(await auth.getAccessToken()).toBe('AT2');
     expect(calls).toHaveLength(2);
+  });
+
+  it('never follows a redirect from the token endpoint', async () => {
+    const { auth, calls } = makeAuth([tokenResponse('AT1')]);
+    await auth.getAccessToken();
+    expect(calls[0]?.init.redirect).toBe('error');
+  });
+
+  it('repeats the identical token request on 429 (Retry-After) and 503', async () => {
+    const { auth, calls, slept } = makeAuth([
+      new Response('slow down', { status: 429, headers: { 'retry-after': '4' } }),
+      jsonResponse({ error: 'temporarily_unavailable' }, 503),
+      tokenResponse('AT1'),
+    ]);
+    expect(await auth.getAccessToken()).toBe('AT1');
+    expect(slept).toEqual([4000, 2000]);
+    expect(new Set(calls.map((c) => c.body)).size).toBe(1);
+  });
+
+  it('after the retries reports an unreachable IdP as DiadocAuthError (status 0)', async () => {
+    const down = (): TypeError =>
+      new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND') });
+    const fetchFn = vi.fn<typeof fetch>(() => Promise.reject(down()));
+    const { auth } = makeAuth([], { fetch: fetchFn, retry: { maxAttempts: 2 } });
+    const err = await auth.getAccessToken().catch((e: unknown) => e);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(err).toBeInstanceOf(DiadocAuthError);
+    expect(err).toMatchObject({ status: 0 });
+    expect((err as Error).message).toMatch(/ENOTFOUND/);
   });
 
   it('stores a rotated refresh token via the callback and uses it next time', async () => {
@@ -233,7 +281,7 @@ describe('RefreshTokenAuth', () => {
 
   it('does not cache a failure: the next call retries', async () => {
     const { auth } = makeAuth([
-      jsonResponse({ error: 'temporarily_unavailable' }, 503),
+      jsonResponse({ error: 'invalid_grant' }, 400),
       tokenResponse('AT1'),
     ]);
     await expect(auth.getAccessToken()).rejects.toBeInstanceOf(DiadocAuthError);

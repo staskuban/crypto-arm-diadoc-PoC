@@ -30,6 +30,10 @@ export async function loadDiadocEnv(
   readFile: (path: string) => Promise<string> = (path) => fsReadFile(path, 'utf8'),
 ): Promise<DiadocEnvConfig> {
   const baseUrl = checkUrl('DIADOC_API_URL', required(env, 'DIADOC_API_URL'));
+  // The client appends paths to the base as text: a query or fragment would swallow them.
+  if (/[?#]/.test(baseUrl)) {
+    throw new DiadocConfigError('DIADOC_API_URL must not contain a query or fragment');
+  }
   const config: DiadocEnvConfig = {
     baseUrl,
     clientId: required(env, 'DIADOC_CLIENT_ID'),

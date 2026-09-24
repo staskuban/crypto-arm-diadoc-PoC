@@ -12,7 +12,7 @@ How it was checked:
 
 ## Major
 
-### M1. Диадок fetches follow redirects; a cross-origin 307/308 forwards `client_secret` + `refresh_token` (and the signed УПД) to the new host — **(run)**
+### M1. Диадок fetches follow redirects; a cross-origin 307/308 forwards `client_secret` + `refresh_token` (and the signed УПД) to the new host — **(run)** — **fixed in F3** (`redirect: 'error'` in client + auth; real-server test in `client.test.ts`)
 - Where: `src/diadoc/auth.ts:90-103`, `src/diadoc/client.ts:208-213` (no `redirect` option, so the default `follow` applies).
 - Scenario: the IdP, a corporate proxy, or a misconfigured `DIADOC_TOKEN_URL` answers 307 to another origin.
   - undici drops `Authorization`, but it re-sends the POST body unchanged.
@@ -21,7 +21,7 @@ How it was checked:
 - The signer already does this correctly: `server-cms-signer.ts:158` sets `redirect: 'error'`, with a test at `server-cms-signer.test.ts:236`.
 - Fix: set `redirect: 'error'` in both Диадок fetches and add the same test.
 
-### M2. Transient PostMessage failures are not retried with the identical body; the only recovery is re-running `send`, which is the unverified D7 path
+### M2. Transient PostMessage failures are not retried with the identical body; the only recovery is re-running `send`, which is the unverified D7 path — **fixed in F3** (bounded same-body retry in `DiadocClient` via `src/diadoc/http-retry.ts`, GETs too; `DiadocPostOutcomeUnknownError` → `POST_FAILED` "may have been posted")
 - Where: `src/diadoc/client.ts:114-121` retries only on 204. `client.ts:178-195` throws immediately on 5xx, 429, network errors and timeouts. `src/pipeline/send.ts:199-201` turns these into `POST_FAILED`, and the CLI exits 1.
 - Scenario: Диадок created the message, but the response is lost (60 s `AbortSignal.timeout`, a 502 from the balancer, a 2xx with a non-JSON proxy page via `readJson`, `client.ts:227`).
   - The operator re-runs `send`. The `operationId` is the same, but the CMS is re-signed (new signing time), and on the shelf path `NameOnShelf` is new too.
@@ -32,14 +32,14 @@ How it was checked:
   - For GET, retry at least on 429/5xx.
   - In the CLI, word `POST_FAILED` after a sent request as "may have been posted, operationId …" (`src/cli.ts:24`).
 
-### M3. 429 / `Retry-After` is honoured only for PostMessage 204
+### M3. 429 / `Retry-After` is honoured only for PostMessage 204 — **fixed in F3** (one handler in `fetchWithRetry` for every Диадок and IdP call)
 - Where: `retryAfterMs` is used only at `src/diadoc/client.ts:118`.
 - Scenario:
   - CanPostMessage or ShelfUpload gets a 429 → `PRECHECK_FAILED` / `SHELF_UPLOAD_FAILED`, exit 1.
   - During polling, `src/pipeline/status.ts:62-70` treats 429 as transient but sleeps on its own backoff and ignores the header.
 - Fix: one 429 handler in `DiadocClient.send` (bounded by attempts and a total budget), or at least expose `Retry-After` on `DiadocError` so the poller can use it.
 
-### M4. Refresh-token write-back is not robust — **(run: parts a, d)**
+### M4. Refresh-token write-back is not robust — **(run: parts a, d)** — **fixed in F3** (`src/diadoc/token-file.ts`: a–e; the lock is `<file>.lock`, a stale one after kill -9 is deleted by hand)
 - Where: `src/cli.ts:142-158` (`onRefreshTokenRotated`) and `src/cli.ts:129-139` (`checkTokenFileWritable`).
 - (a) `writeFile(tmp, …, { mode: 0o600 })` applies the mode only when the file is created. A stale `<file>.<pid>.tmp` keeps its old mode, e.g. `0644`. PIDs repeat, and inside a container the process is often PID 1.
 - (b) There is no `fsync` of the file or the directory. After a power loss the file may hold the old, already-revoked token.
@@ -110,12 +110,12 @@ How it was checked:
    - `changeme` is not rejected (`src/signer/config.ts:17-33`).
    - The same `changeme` gap exists for `DIADOC_FROM_BOX_ID` / `DIADOC_TO_BOX_ID` (`src/pipeline/config.ts:58-62`).
    - Fix: reuse the `checkUrl` / placeholder policy from `src/diadoc/config.ts:76-98`.
-8. **`DIADOC_API_URL` with a query or fragment breaks URL building.** `client.ts:179` builds `this.baseUrl + path`, and `checkUrl` does not reject `search`/`hash`. The signer already rejects them (`server-cms-signer.ts:203`). Query values themselves are escaped by `searchParams.set`, so there is no injection.
-9. **The polling deadline can overshoot.**
+8. **`DIADOC_API_URL` with a query or fragment breaks URL building.** — **fixed in F3** (config + `DiadocClient` constructor). `client.ts:179` builds `this.baseUrl + path`, and `checkUrl` does not reject `search`/`hash`. The signer already rejects them (`server-cms-signer.ts:203`). Query values themselves are escaped by `searchParams.set`, so there is no injection.
+9. **The polling deadline can overshoot.** — **fixed in F3** (GetDocument gets the deadline: no retry pause past it; overshoot ≤ one request + token refresh; the abort signal cancels an in-flight GetDocument).
    - `status.ts:102-105` caps the sleep at the time left, but the next `getDocument` can take up to `DIADOC_TIMEOUT_MS` (60 s), plus a token refresh (30 s), plus one 401 retry.
    - The "never throws after post" guarantee holds.
-10. **Ctrl+C gives no feedback.** `src/cli.ts:185` aborts only between steps (as documented). A PostMessage 204 loop can run for minutes, and the first Ctrl+C prints nothing. Fix: print "interrupting after the current step, Ctrl+C again to kill".
-11. **409 texts are broad and printed unbounded (D4, unverified).**
+10. **Ctrl+C gives no feedback.** — **fixed in F3** (`interruptHandler` in `src/cli.ts`). `src/cli.ts:185` aborts only between steps (as documented). A PostMessage 204 loop can run for minutes, and the first Ctrl+C prints nothing. Fix: print "interrupting after the current step, Ctrl+C again to kill".
+11. **409 texts are broad and printed unbounded (D4, unverified).** — **partly fixed in F3**: the printed body is truncated to 1000 chars; narrowing `/already/i` waits for the real texts from S1.
     - `/already/i` would classify "operation already in progress" as `ALREADY_SENT` (`src/pipeline/conflict.ts:23`; `forbidden` is checked first, which is right).
     - `send.ts:299` prints `error.body` untruncated, unlike `DiadocError.message`, which is cut to 1000 characters.
 12. **Extension case changes `operationId`.** — **(run)** `parseUtd` accepts `.XML` (`src/utd/parse.ts:59`, `/i`). The full `fileName` goes into `operationIdFor` (`send.ts:113`), so renaming `X.xml` to `X.XML` yields a different key for the same bytes, i.e. a second send. Fix: hash `utd.idFile` instead, or require lowercase `.xml`.
@@ -128,8 +128,8 @@ How it was checked:
     There is no body-size limit problem, but no test pins it. Add a large-payload case to the signer integration test.
 16. **Seam test gap.** `send.test.ts` uses `FakeSigner`/`FakeDiadoc` with a stub CMS, and `client.test.ts` tests base64 separately. No test runs the real `DiadocClient` (mock `fetch`) under `sendUtd` on the windows-1251 fixture and asserts that the base64-decoded `SignedContent.Content` (and the ShelfUpload body) equals the file byte for byte. Nor does any test run the real `ServerCmsSigner` with the BER fixture. The code is correct today; a regression would go unnoticed.
 17. **ASN.1 leniency (documented).** `berToDer` accepts constructed universal tag 0 (`30 80 20 00 00 00` → `30022000`; `src/asn1/der.ts:146`). `isDerFramed` accepts a constructed string under an IMPLICIT context tag (`der.ts:194`). Both are harmless for the КриптоПро CMS (checked with `openssl asn1parse`), but `buildUtdAttachment`'s DER check is a framing check only (`src/utd/attachment.ts:52` → `isDerFramed`, `der.ts:73`).
-18. **A rotated token when `expires_in` is missing.** `auth.ts:137`: with no lifetime, every API call triggers a refresh (and a file write if the token rotated). This widens the M4 window. Fix: fall back to a short default lifetime, e.g. 5 min.
-19. **Non-standard token-file names are not git-ignored.** Only `.diadoc-refresh-token*` is covered (checked with `git check-ignore`). Recommend a path outside the repo in `.env.example`.
+18. **A rotated token when `expires_in` is missing.** — **fixed in F3** (5 min default; `0`/negative still means no caching). `auth.ts:137`: with no lifetime, every API call triggers a refresh (and a file write if the token rotated). This widens the M4 window. Fix: fall back to a short default lifetime, e.g. 5 min.
+19. **Non-standard token-file names are not git-ignored.** — **fixed in F3** (`.env.example` recommends a path outside the repo). Only `.diadoc-refresh-token*` is covered (checked with `git check-ignore`). Recommend a path outside the repo in `.env.example`.
 
 ## Docs vs code drift
 
