@@ -39,6 +39,43 @@ export class SignerKeyNotFoundError extends SignerHttpError {
   override name = 'SignerKeyNotFoundError';
 }
 
+/**
+ * The JSON request body is over the КриптоАРМ Server body limit (`JSON_LIMIT`, default `50mb` =
+ * 52 428 800 B). Raised before sending when the body exceeds `maxRequestBytes` (`status` is then
+ * undefined), or when the server rejects it anyway: the stand answers HTTP 400 «request entity
+ * too large», a plain body-parser setup would answer 413. Retrying does not help.
+ */
+export class SignerPayloadTooLargeError extends SignerError {
+  override name = 'SignerPayloadTooLargeError';
+  /** HTTP status when the server (or a proxy in front of it) rejected the body. */
+  readonly status: number | undefined;
+  readonly upstreamMessage: string | undefined;
+  readonly requestId: string | undefined;
+
+  constructor(
+    readonly operation: SignerOperation,
+    readonly requestBytes: number,
+    readonly limitBytes: number,
+    response?: { status: number; upstreamMessage: string; requestId?: string | undefined },
+  ) {
+    super(
+      response === undefined
+        ? `${operation}: request body of ${String(requestBytes)} B is too large for КриптоАРМ Server ` +
+            `(limit ${String(limitBytes)} B = server JSON_LIMIT / CRYPTOARM_SERVER_MAX_REQUEST_BYTES; ` +
+            `data travels as Base64, so files up to about 3/4 of it fit); not sent`
+        : `${operation}: request body of ${String(requestBytes)} B rejected as too large ` +
+            `(HTTP ${String(response.status)}${response.upstreamMessage ? `: ${response.upstreamMessage}` : ''})` +
+            (response.requestId ? ` (request id ${response.requestId})` : '') +
+            `; КриптоАРМ Server answers 400 over its JSON_LIMIT, a 413 usually comes from a proxy in front of it ` +
+            `(e.g. nginx client_max_body_size); keep CRYPTOARM_SERVER_MAX_REQUEST_BYTES (now ${String(limitBytes)} B) ` +
+            `at or below both`,
+    );
+    this.status = response?.status;
+    this.upstreamMessage = response?.upstreamMessage;
+    this.requestId = response?.requestId;
+  }
+}
+
 /** The request did not complete within the configured timeout. */
 export class SignerTimeoutError extends SignerError {
   override name = 'SignerTimeoutError';

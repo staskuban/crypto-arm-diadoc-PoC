@@ -13,6 +13,10 @@ keys and signs via `POST /cms/sign`. `Dockerfile` and `docker-compose.yml` follo
 - It also splits build and run (D8, see [Build and run](#run)).
 - `LOG_LEVEL` defaults to `warn,error`. At the `log` level the server prints the first 8 characters of the API key
   on every request.
+- `JSON_LIMIT` (default `50mb`) caps the request body at exactly 52 428 800 B; one byte more is answered with
+  HTTP 400 «request entity too large» (not 413). With Base64 data and the CMS in the verify body the largest
+  signable file is about 39.3 MB (measured in T10). If you change it, set `CRYPTOARM_SERVER_MAX_REQUEST_BYTES` for
+  the pipeline to the same number of bytes.
 
 ## Manual prerequisites
 
