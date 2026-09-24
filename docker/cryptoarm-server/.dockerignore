@@ -1,0 +1,5 @@
+# Build context needs only the Dockerfile, the CSP distribution and the license wrapper.
+*
+!Dockerfile
+!cryptopro/linux-amd64_deb.tgz
+!setup-trusted-license-optional.sh

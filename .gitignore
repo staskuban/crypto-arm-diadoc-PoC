@@ -1,0 +1,21 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# КриптоАРМ Server: human-downloaded CSP distribution, CSP key store, fetched test certs
+docker/cryptoarm-server/cryptopro/*
+!docker/cryptoarm-server/cryptopro/.gitkeep
+docker/cryptoarm-server/cert_storage/
+docker/cryptoarm-server/certs/**/*.cer
+
+# Other key/cert material and КриптоПро key containers
+*.key
+*.pem
+*.crt
+*.der
+*.p7b
+*.000/
+*.tmp
