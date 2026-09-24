@@ -35,7 +35,12 @@ const RESULT: SendUtdResult = {
 function setup(send: CliDeps['send'] = () => Promise.resolve(RESULT), env: CliEnv = ENV) {
   const out: string[] = [];
   const err: string[] = [];
-  const sent: { fileName: string; content: Buffer; precheck: boolean | undefined }[] = [];
+  const sent: {
+    fileName: string;
+    content: Buffer;
+    precheck: boolean | undefined;
+    resend?: string | undefined;
+  }[] = [];
   const deps: CliDeps = {
     env,
     readFile: (path) =>
@@ -47,7 +52,11 @@ function setup(send: CliDeps['send'] = () => Promise.resolve(RESULT), env: CliEn
     createSigner: () => Promise.resolve({} as Signer),
     createDiadoc: () => Promise.resolve({} as PipelineDiadoc),
     send: (input, d, options) => {
-      sent.push({ ...input, precheck: options.precheck });
+      sent.push({
+        ...input,
+        precheck: options.precheck,
+        ...('resend' in options ? { resend: options.resend } : {}),
+      });
       return send(input, d, options);
     },
   };
@@ -82,6 +91,41 @@ describe('cli', () => {
     await main(['send', '/data/f.xml', '--no-precheck'], deps);
     expect(sent[0]?.precheck).toBe(false);
   });
+
+  it('--resend passes a fresh random salt and says how to repeat that resend', async () => {
+    const first = setup();
+    const second = setup();
+    expect(await main(['send', '/data/f.xml', '--resend'], first.deps)).toBe(EXIT.ok);
+    await main(['send', '--resend', '/data/f.xml'], second.deps);
+    const salt = first.sent[0]?.resend ?? '';
+    expect(salt).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(second.sent[0]?.resend).not.toBe(salt);
+    expect(first.err.join('')).toContain(`--resend=${salt}`);
+  });
+
+  it('--resend=<salt> passes that salt', async () => {
+    const { deps, sent, err } = setup();
+    expect(await main(['send', '/data/f.xml', '--resend=retry-2'], deps)).toBe(EXIT.ok);
+    expect(sent[0]?.resend).toBe('retry-2');
+    expect(err.join('')).toContain('--resend=retry-2');
+  });
+
+  it('without --resend no salt is passed', async () => {
+    const { deps, sent, err } = setup();
+    await main(['send', '/data/f.xml'], deps);
+    expect(sent[0]).not.toHaveProperty('resend');
+    expect(err.join('')).not.toMatch(/resend/);
+  });
+
+  it.each([['--resend='], ['--resend=a b'], ['--resend=-x'], ['--resend', '--resend=a']])(
+    'rejects %j as usage',
+    async (...flags) => {
+      const { deps, err, sent } = setup();
+      expect(await main(['send', '/data/f.xml', ...flags], deps)).toBe(EXIT.usage);
+      expect(err.join('')).toMatch(/resend/);
+      expect(sent).toHaveLength(0);
+    },
+  );
 
   it('exits 3 when the docflow ended in an error, with the status error serialised', async () => {
     const { deps, out } = setup(() =>
