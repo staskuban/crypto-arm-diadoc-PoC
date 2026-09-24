@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   DiadocConflictError,
   DiadocOperationPendingError,
+  DiadocPostOutcomeUnknownError,
   findDocumentEntity,
   SHELF_UPLOAD_MAX_BYTES,
   type DiadocClient,
@@ -64,9 +65,10 @@ export interface SendUtdOptions {
   customDocumentId?: string;
   resolveVersion?: ParseUtdOptions['resolveVersion'];
   /**
-   * Checked between steps and passed to the signer; Diadoc calls themselves are not interrupted (the
-   * client takes no signal, and PostMessage may wait through its 204 retries). Before PostMessage an
-   * abort rejects with the signal's reason; after it, polling stops and the result is returned.
+   * Checked between steps and passed to the signer and to GetDocument. CanPostMessage, ShelfUpload and
+   * PostMessage are not interrupted (PostMessage may wait through its bounded retries). Before
+   * PostMessage an abort rejects with the signal's reason; after it, polling stops and the result is
+   * returned.
    */
   signal?: AbortSignal;
 }
@@ -214,7 +216,7 @@ export async function sendUtd(
   const poll = await pollDocflowStatus(
     { boxId: fromBoxId, messageId: message.MessageId, entityId: entity.EntityId },
     {
-      getDocument: (ref) => deps.diadoc.getDocument(ref),
+      getDocument: (ref, o) => deps.diadoc.getDocument(ref, o),
       sleep: deps.sleep ?? ((ms) => delay(ms, undefined, callOptions)),
       now: deps.now ?? Date.now,
       signal,
@@ -290,14 +292,30 @@ function postError(error: unknown, operationId: string): unknown {
       { cause: error, operationId },
     );
   }
+  if (error instanceof DiadocPostOutcomeUnknownError) {
+    return new PipelineError(
+      'POST_FAILED',
+      'post',
+      `${describe(error.cause)}; the message may have been posted: look it up in Diadoc before ` +
+        'sending again (a repeat reuses the operationId, D7)',
+      { cause: error, operationId },
+    );
+  }
   if (!(error instanceof DiadocConflictError)) {
     return new PipelineError('POST_FAILED', 'post', describe(error), { cause: error, operationId });
   }
   const code = (
     { duplicate: 'ALREADY_SENT', forbidden: 'RECIPIENT_FORBIDS', unknown: 'POST_CONFLICT' } as const
   )[classifyConflict(error.body)];
-  return new PipelineError(code, 'post', `409: ${error.body}`, { cause: error, operationId });
+  const body =
+    error.body.length > MAX_CONFLICT_BODY
+      ? `${error.body.slice(0, MAX_CONFLICT_BODY)}… (${String(error.body.length)} chars)`
+      : error.body;
+  return new PipelineError(code, 'post', `409: ${body}`, { cause: error, operationId });
 }
+
+/** Same bound as DiadocError.message; the full body stays on `cause`. */
+const MAX_CONFLICT_BODY = 1000;
 
 /** Missing severity counts as an error: the stricter reading of an undocumented field. */
 function isBlocking(e: MessageValidationError): boolean {

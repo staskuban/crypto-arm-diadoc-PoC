@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server and posts it to Diadoc.
 // Settings come from env (see .env.example); `npm run cli -- send <file.xml>` loads ./.env.
-import { constants } from 'node:fs';
-import { access, readFile as fsReadFile, rename, writeFile } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { readFile as fsReadFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { DiadocClient, loadDiadocEnv, RefreshTokenAuth } from './diadoc/index.js';
+import {
+  DiadocClient,
+  loadDiadocEnv,
+  lockRefreshTokenFile,
+  RefreshTokenAuth,
+  writeRefreshTokenFile,
+} from './diadoc/index.js';
 import {
   loadPipelineConfig,
   PipelineError,
@@ -30,13 +35,16 @@ export const EXIT = {
   postedUntracked: 4,
 } as const;
 
+/** `close` releases what the client holds for the run (the refresh-token file lock). */
+export type CliDiadoc = PipelineDiadoc & { close?: () => Promise<void> };
+
 export interface CliDeps {
   env: CliEnv;
   readFile: (path: string) => Promise<Buffer>;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   createSigner?: (env: CliEnv) => Promise<Signer>;
-  createDiadoc?: (env: CliEnv, stderr: (text: string) => void) => Promise<PipelineDiadoc>;
+  createDiadoc?: (env: CliEnv, stderr: (text: string) => void) => Promise<CliDiadoc>;
   send?: typeof sendUtd;
   signal?: AbortSignal;
 }
@@ -68,11 +76,12 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     return EXIT.usage;
   }
 
+  let diadoc: CliDiadoc | undefined;
   try {
     const config = loadPipelineConfig(deps.env);
     const content = await deps.readFile(path);
     const signer = await (deps.createSigner ?? createSigner)(deps.env);
-    const diadoc = await (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr);
+    diadoc = await (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr);
     const result = await (deps.send ?? sendUtd)(
       { fileName: basename(path), content },
       {
@@ -97,6 +106,11 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     return error instanceof PipelineError && error.code === 'NO_DOCUMENT_ENTITY'
       ? EXIT.postedUntracked
       : EXIT.failed;
+  } finally {
+    // The exit code is already decided (and the JSON printed); a failing release must not change it.
+    await diadoc?.close?.().catch((error: unknown) => {
+      deps.stderr(`warning: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
   }
 }
 
@@ -104,41 +118,37 @@ async function createSigner(env: CliEnv): Promise<Signer> {
   return new ServerCmsSigner(await loadServerCmsSignerOptions(env));
 }
 
-async function createDiadoc(env: CliEnv, stderr: (text: string) => void): Promise<PipelineDiadoc> {
-  const config = await loadDiadocEnv(env);
-  const tokenFile = config.refreshTokenFile;
-  if (tokenFile !== undefined) await checkTokenFileWritable(tokenFile);
-  const auth = new RefreshTokenAuth({
-    clientId: config.clientId,
-    clientSecret: config.clientSecret,
-    refreshToken: config.refreshToken,
-    ...(config.tokenUrl === undefined ? {} : { tokenUrl: config.tokenUrl }),
-    onRefreshTokenRotated: onRefreshTokenRotated(tokenFile, stderr),
-  });
-  return new DiadocClient({
-    auth,
-    baseUrl: config.baseUrl,
-    ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
-  });
-}
-
 /**
- * A rotated refresh token that cannot be saved is lost for good (the old one may already be dead), so
- * the file and its directory are checked before the first token exchange.
+ * With DIADOC_REFRESH_TOKEN_FILE the file is locked (and checked to be replaceable) before the token
+ * is read, and stays locked until `close`.
  */
-export async function checkTokenFileWritable(tokenFile: string): Promise<void> {
+async function createDiadoc(env: CliEnv, stderr: (text: string) => void): Promise<CliDiadoc> {
+  // Same condition as loadDiadocEnv, which reads the token only after the lock is taken.
+  const lock = env.DIADOC_REFRESH_TOKEN_FILE
+    ? await lockRefreshTokenFile(env.DIADOC_REFRESH_TOKEN_FILE)
+    : undefined;
   try {
-    await access(tokenFile, constants.R_OK | constants.W_OK);
-    await access(dirname(tokenFile), constants.W_OK);
+    const config = await loadDiadocEnv(env);
+    const auth = new RefreshTokenAuth({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      refreshToken: config.refreshToken,
+      ...(config.tokenUrl === undefined ? {} : { tokenUrl: config.tokenUrl }),
+      onRefreshTokenRotated: onRefreshTokenRotated(config.refreshTokenFile, stderr),
+    });
+    const client = new DiadocClient({
+      auth,
+      baseUrl: config.baseUrl,
+      ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+    });
+    return Object.assign(client, { close: () => lock?.release() ?? Promise.resolve() });
   } catch (error) {
-    throw new Error(
-      `DIADOC_REFRESH_TOKEN_FILE ${tokenFile}: the file and its directory must be writable`,
-      { cause: error },
-    );
+    await lock?.release();
+    throw error;
   }
 }
 
-/** Persists a rotated refresh token (write-then-rename, mode 600); without a file only warns. */
+/** Persists a rotated refresh token (see writeRefreshTokenFile); without a file only warns. */
 export function onRefreshTokenRotated(
   tokenFile: string | undefined,
   stderr: (text: string) => void,
@@ -151,10 +161,28 @@ export function onRefreshTokenRotated(
       );
       return;
     }
-    // Per-process temp name; the rename is atomic, so a crash never leaves a truncated token file.
-    const tmp = `${tokenFile}.${String(process.pid)}.tmp`;
-    await writeFile(tmp, `${token}\n`, { mode: 0o600 });
-    await rename(tmp, tokenFile);
+    await writeRefreshTokenFile(tokenFile, token, {
+      warn: (message) => {
+        stderr(`warning: ${message}\n`);
+      },
+    });
+  };
+}
+
+/**
+ * The first signal aborts between steps (a running Diadoc request and its retries finish first);
+ * the handler is registered with `once`, so a second signal kills the process.
+ */
+export function interruptHandler(
+  controller: AbortController,
+  stderr: (text: string) => void,
+): (signal: NodeJS.Signals) => void {
+  return (signal) => {
+    stderr(
+      `${signal}: stopping after the current step; send ${signal} again to kill ` +
+        '(then check Diadoc by operationId and delete a left-over refresh-token .lock file)\n',
+    );
+    controller.abort(new Error(`interrupted (${signal})`));
   };
 }
 
@@ -183,11 +211,8 @@ const entry = process.argv[1];
 if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
   const controller = new AbortController();
   // SIGTERM is how `docker stop` ends the container: abort so a posted message still reports its ids.
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.once(signal, () => {
-      controller.abort(new Error(`interrupted (${signal})`));
-    });
-  }
+  const onSignal = interruptHandler(controller, (text) => process.stderr.write(text));
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, onSignal);
   process.exitCode = await main(process.argv.slice(2), {
     env: process.env,
     readFile: (path) => fsReadFile(path),

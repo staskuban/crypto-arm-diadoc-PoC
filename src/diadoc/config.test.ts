@@ -72,6 +72,16 @@ describe('loadDiadocEnv', () => {
     ).toMatchObject({ baseUrl: 'http://127.0.0.1:8080' });
   });
 
+  it.each([
+    'https://diadoc.example/?x=1',
+    'https://diadoc.example/#top',
+    'https://diadoc.example/?',
+  ])('rejects a DIADOC_API_URL with a query or fragment: %s', async (url) => {
+    await expect(loadDiadocEnv({ ...base, DIADOC_API_URL: url }, noFile)).rejects.toThrow(
+      new DiadocConfigError('DIADOC_API_URL must not contain a query or fragment'),
+    );
+  });
+
   it('rejects the .env.example placeholder and blank values', async () => {
     await expect(
       loadDiadocEnv({ ...base, DIADOC_CLIENT_SECRET: 'changeme' }, noFile),

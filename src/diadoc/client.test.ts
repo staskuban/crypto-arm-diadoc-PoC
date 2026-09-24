@@ -1,4 +1,7 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 
 import { type AccessTokenProvider, RefreshTokenAuth } from './auth.js';
 import {
@@ -8,7 +11,12 @@ import {
   findDocumentEntity,
   SHELF_UPLOAD_MAX_BYTES,
 } from './client.js';
-import { DiadocConflictError, DiadocError, DiadocOperationPendingError } from './errors.js';
+import {
+  DiadocConflictError,
+  DiadocError,
+  DiadocOperationPendingError,
+  DiadocPostOutcomeUnknownError,
+} from './errors.js';
 import type { Message, MessageToPost, SignedContent } from './types.js';
 
 interface Call {
@@ -96,6 +104,13 @@ describe('DiadocClient hosts', () => {
     await client.getMyOrganizations();
     expect(calls[0]?.url.host).toBe(host);
   });
+
+  it.each(['https://api.test/?x=1', 'https://api.test/#frag'])(
+    'rejects a baseUrl with a query or fragment (%s)',
+    (baseUrl) => {
+      expect(() => makeClient([], { baseUrl })).toThrow(/query or fragment/);
+    },
+  );
 
   it('accepts an explicit baseUrl (trailing slash tolerated)', async () => {
     const { client, calls } = makeClient([jsonResponse({ Organizations: [] })], {
@@ -499,5 +514,245 @@ describe('DiadocClient.shelfUpload', () => {
     expect(await client.shelfUpload(Buffer.from('abc'))).toBe('dd-api-2');
     expect(headerOf(calls[1], 'authorization')).toBe('Bearer NEW');
     expect(Buffer.from(calls[1]?.init.body as Uint8Array).toString()).toBe('abc');
+  });
+});
+
+const fetchFailed = (cause: string): TypeError =>
+  new TypeError('fetch failed', { cause: new Error(cause) });
+
+describe('DiadocClient transient failures', () => {
+  const message: MessageToPost = {
+    FromBoxId: 'from',
+    ToBoxId: 'to',
+    DocumentAttachments: [
+      {
+        TypeNamedId: 'UniversalTransferDocument',
+        Function: 'СЧФДОП',
+        Version: 'utd970_05_03_01',
+        SignedContent: { Content: Buffer.from('c'), Signature: Buffer.from([0x30, 0x00]) },
+      },
+    ],
+  };
+  const posted: Message = { MessageId: 'msg' };
+
+  /** fetch that fails with the given errors first, then answers from `responses`. */
+  function flaky(outcomes: (Response | Error)[]): { calls: Call[]; fetchFn: typeof fetch } {
+    const calls: Call[] = [];
+    const fetchFn = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls.push({ url: new URL(urlOf(input)), init: init ?? {}, body: bodyOf(init) });
+      const next = outcomes.shift();
+      if (next === undefined) return Promise.reject(new Error('unexpected request'));
+      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+    };
+    return { calls, fetchFn };
+  }
+
+  it('sends every request with redirect: error', async () => {
+    const { client, calls } = makeClient([
+      jsonResponse({ Organizations: [] }),
+      jsonResponse({ Errors: [] }),
+      new Response('shelf-1'),
+      jsonResponse(posted),
+    ]);
+    await client.getMyOrganizations();
+    await client.canPostMessage({ FromBoxId: 'a', ToBoxId: 'b', DocumentPrototypes: [] });
+    await client.shelfUpload(Buffer.from('x'));
+    await client.postMessage(message, { operationId: 'op' });
+    expect(calls.map((c) => c.init.redirect)).toEqual(['error', 'error', 'error', 'error']);
+  });
+
+  it.each([
+    ['a 502', new Response('bad gateway', { status: 502 })],
+    ['a 503', new Response('unavailable', { status: 503 })],
+    ['a reset connection', fetchFailed('ECONNRESET')],
+    ['a timeout', new DOMException('timed out', 'TimeoutError')],
+  ])('repeats PostMessage with the identical request after %s', async (_name, first) => {
+    const { calls, fetchFn } = flaky([first, jsonResponse(posted)]);
+    const { client, slept } = makeClient([], { fetch: fetchFn });
+
+    expect(await client.postMessage(message, { operationId: 'op-1' })).toEqual(posted);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.url.href).toBe(calls[0]?.url.href);
+    expect(calls[1]?.url.searchParams.get('operationId')).toBe('op-1');
+    expect(calls[1]?.body).toBe(calls[0]?.body);
+    expect(slept).toEqual([1000]);
+  });
+
+  it('honours Retry-After on a PostMessage 429', async () => {
+    const { client, calls, slept } = makeClient([
+      new Response('slow down', { status: 429, headers: { 'retry-after': '5' } }),
+      jsonResponse(posted),
+    ]);
+    await client.postMessage(message, { operationId: 'op-1' });
+    expect(slept).toEqual([5000]);
+    expect(calls[1]?.body).toBe(calls[0]?.body);
+  });
+
+  it('after the retries says the message may have been posted, keeping the cause', async () => {
+    const { client, calls } = makeClient(
+      [0, 1, 2].map(() => new Response('bad gateway', { status: 502 })),
+      { retry: { maxAttempts: 3 } },
+    );
+    const err = await client.postMessage(message, { operationId: 'op-1' }).catch((e: unknown) => e);
+    expect(calls).toHaveLength(3);
+    expect(err).toBeInstanceOf(DiadocPostOutcomeUnknownError);
+    expect(err).toMatchObject({ operationId: 'op-1' });
+    expect((err as Error).message).toMatch(/may have been posted/);
+    expect((err as Error).cause).toMatchObject({ status: 502 });
+  });
+
+  it('a lost response followed by a plain rejection is still ambiguous', async () => {
+    const { calls, fetchFn } = flaky([
+      fetchFailed('ECONNRESET'),
+      new Response('Invalid auth token', { status: 401 }),
+      new Response('Invalid auth token', { status: 401 }),
+    ]);
+    const { client } = makeClient([], { fetch: fetchFn });
+    const err = await client.postMessage(message, { operationId: 'op' }).catch((e: unknown) => e);
+    expect(calls).toHaveLength(3);
+    expect(err).toBeInstanceOf(DiadocPostOutcomeUnknownError);
+  });
+
+  it('a 2xx PostMessage answer that is not JSON may have been posted', async () => {
+    const { client } = makeClient([new Response('<html>proxy</html>', { status: 200 })]);
+    await expect(client.postMessage(message, { operationId: 'op' })).rejects.toBeInstanceOf(
+      DiadocPostOutcomeUnknownError,
+    );
+  });
+
+  it.each([
+    ['a 400', [new Response('bad request', { status: 400 })]],
+    ['only 429s', [0, 1, 2].map(() => new Response('slow', { status: 429 }))],
+  ])('a PostMessage rejected with %s was not posted: plain DiadocError', async (_n, responses) => {
+    const { client } = makeClient(responses, { retry: { maxAttempts: 3 } });
+    const err = await client.postMessage(message, { operationId: 'op' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocError);
+    expect(err).not.toBeInstanceOf(DiadocPostOutcomeUnknownError);
+  });
+
+  it('a 409 after a lost response stays a conflict', async () => {
+    const { calls, fetchFn } = flaky([
+      fetchFailed('ECONNRESET'),
+      new Response('dup', { status: 409 }),
+    ]);
+    const { client } = makeClient([], { fetch: fetchFn });
+    await expect(client.postMessage(message, { operationId: 'op' })).rejects.toBeInstanceOf(
+      DiadocConflictError,
+    );
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a refused redirect is not retried', async () => {
+    const redirect = fetchFailed('unexpected redirect');
+    const { calls, fetchFn } = flaky([redirect]);
+    const { client } = makeClient([], { fetch: fetchFn });
+    await expect(client.getMyOrganizations()).rejects.toBe(redirect);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries 429 with Retry-After on GET, CanPostMessage and ShelfUpload (same bytes)', async () => {
+    const tooMany = (): Response =>
+      new Response('slow down', { status: 429, headers: { 'retry-after': '2' } });
+    const { client, calls, slept } = makeClient([
+      tooMany(),
+      jsonResponse({ Organizations: [] }),
+      tooMany(),
+      jsonResponse({ Errors: [] }),
+      tooMany(),
+      new Response('shelf-1'),
+    ]);
+    await client.getMyOrganizations();
+    await client.canPostMessage({ FromBoxId: 'a', ToBoxId: 'b', DocumentPrototypes: [] });
+    expect(await client.shelfUpload(Buffer.from('abc'))).toBe('shelf-1');
+    expect(slept).toEqual([2000, 2000, 2000]);
+    expect(Buffer.from(calls[5]?.init.body as Uint8Array).toString()).toBe('abc');
+  });
+
+  it('getDocument does not wait past the given deadline', async () => {
+    const { client, calls, slept } = makeClient(
+      [new Response('bad gateway', { status: 502 }), jsonResponse({})],
+      { now: () => 0 },
+    );
+    const ref = { boxId: 'b', messageId: 'm', entityId: 'e' };
+    await expect(client.getDocument(ref, { deadline: 500 })).rejects.toMatchObject({
+      status: 502,
+    });
+    expect(calls).toHaveLength(1);
+    expect(slept).toEqual([]);
+  });
+
+  it('getDocument aborts the request with the caller signal', async () => {
+    const controller = new AbortController();
+    const reason = new Error('shutdown');
+    const fetchFn = (_input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason as Error);
+        signal?.addEventListener('abort', () => {
+          reject(signal.reason as Error);
+        });
+      });
+    const { client } = makeClient([], { fetch: fetchFn });
+    const pending = client.getDocument(
+      { boxId: 'b', messageId: 'm', entityId: 'e' },
+      { signal: controller.signal },
+    );
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+  });
+});
+
+describe('redirects against a real HTTP server', () => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const s of servers.splice(0)) s.close();
+  });
+
+  async function listen(handler: Parameters<typeof createServer>[1]): Promise<string> {
+    const server = createServer(handler);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
+  }
+
+  it('neither the API nor the IdP request follows a 307 to another host', async () => {
+    const received: string[] = [];
+    const target = await listen((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      req.on('end', () => {
+        received.push(body);
+        res.end('{}');
+      });
+    });
+    let redirects = 0;
+    const redirector = await listen((_req, res) => {
+      redirects++;
+      res.writeHead(307, { location: `${target.replace('127.0.0.1', 'localhost')}/steal` });
+      res.end();
+    });
+
+    const auth = new RefreshTokenAuth({
+      clientId: 'c',
+      clientSecret: 'SECRET',
+      refreshToken: 'RT',
+      tokenUrl: `${redirector}/token`,
+    });
+    // Not retried: a refused redirect is permanent (one request each).
+    await expect(auth.getAccessToken()).rejects.toMatchObject({
+      name: 'TypeError',
+      cause: { message: 'unexpected redirect' },
+    });
+    expect(redirects).toBe(1);
+
+    const client = new DiadocClient({ auth: new FakeAuth('AT'), baseUrl: redirector });
+    await expect(client.getMyOrganizations()).rejects.toMatchObject({
+      name: 'TypeError',
+      cause: { message: 'unexpected redirect' },
+    });
+    expect(redirects).toBe(2);
+
+    expect(received).toEqual([]);
   });
 });

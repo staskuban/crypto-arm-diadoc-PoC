@@ -1,10 +1,17 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { checkTokenFileWritable, EXIT, main, onRefreshTokenRotated, type CliDeps } from './cli.js';
+import {
+  EXIT,
+  interruptHandler,
+  main,
+  onRefreshTokenRotated,
+  type CliDeps,
+  type CliEnv,
+} from './cli.js';
 import type { PipelineDiadoc, SendUtdResult } from './pipeline/index.js';
 import { PipelineError } from './pipeline/index.js';
 import type { Signer } from './signer/index.js';
@@ -25,7 +32,7 @@ const RESULT: SendUtdResult = {
   warnings: [],
 };
 
-function setup(send: CliDeps['send'] = () => Promise.resolve(RESULT), env = ENV) {
+function setup(send: CliDeps['send'] = () => Promise.resolve(RESULT), env: CliEnv = ENV) {
   const out: string[] = [];
   const err: string[] = [];
   const sent: { fileName: string; content: Buffer; precheck: boolean | undefined }[] = [];
@@ -141,13 +148,76 @@ describe('refresh token persistence', () => {
     expect(err.join('')).not.toMatch(/secret-token/);
   });
 
-  it('checks up front that the token file can be replaced', async () => {
+  const diadocEnv = (file: string) => ({
+    ...ENV,
+    DIADOC_API_URL: 'https://diadoc-api-staging.kontur.ru',
+    DIADOC_CLIENT_ID: 'cid',
+    DIADOC_CLIENT_SECRET: 'secret',
+    DIADOC_REFRESH_TOKEN_FILE: file,
+  });
+
+  it('holds <file>.lock while sending and removes it afterwards', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
     const file = join(dir, 'rt');
-    await writeFile(file, 'x');
-    await expect(checkTokenFileWritable(file)).resolves.toBeUndefined();
-    await expect(checkTokenFileWritable(join(dir, 'missing', 'rt'))).rejects.toThrow(
-      /DIADOC_REFRESH_TOKEN_FILE/,
-    );
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    let lockedDuringSend = false;
+    const { deps } = setup(async () => {
+      lockedDuringSend = await access(`${file}.lock`).then(
+        () => true,
+        () => false,
+      );
+      return RESULT;
+    }, diadocEnv(file));
+    delete deps.createDiadoc;
+
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(lockedDuringSend).toBe(true);
+    await expect(access(`${file}.lock`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses to run while another process holds the lock, and keeps its lock', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    await writeFile(`${file}.lock`, 'pid 4242 host box since 2026-09-24T00:00:00.000Z\n');
+    const { deps, err, sent } = setup(undefined, diadocEnv(file));
+    delete deps.createDiadoc;
+
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/lock.*pid 4242/);
+    expect(sent).toHaveLength(0);
+    expect(await readFile(`${file}.lock`, 'utf8')).toMatch(/^pid 4242/);
+  });
+
+  it('releases the lock when the Diadoc config is invalid', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    const { deps, err } = setup(undefined, { ...diadocEnv(file), DIADOC_CLIENT_ID: '' });
+    delete deps.createDiadoc;
+
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/DIADOC_CLIENT_ID/);
+    await expect(access(`${file}.lock`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('a failing lock release is a warning and keeps the exit code', async () => {
+    const { deps, err } = setup();
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        close: () => Promise.reject(new Error('EROFS: lock not removed')),
+      } as unknown as PipelineDiadoc);
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(err.join('')).toMatch(/warning: EROFS/);
+  });
+});
+
+describe('interrupt', () => {
+  it('first signal aborts and says the current step finishes first', () => {
+    const controller = new AbortController();
+    const err: string[] = [];
+    interruptHandler(controller, (s) => err.push(s))('SIGINT');
+    expect(controller.signal.aborted).toBe(true);
+    expect(err.join('')).toMatch(/after the current step.*again/);
   });
 });

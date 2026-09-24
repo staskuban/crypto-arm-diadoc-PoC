@@ -4,6 +4,7 @@ import {
   type DocflowStatus,
   type Document,
   type DocumentRef,
+  type RequestOptions,
 } from '../diadoc/index.js';
 
 /**
@@ -49,7 +50,8 @@ export interface PollResult {
 }
 
 export interface PollDeps {
-  getDocument(ref: DocumentRef): Promise<Document>;
+  /** Gets the polling deadline (no retry pause past it) and the abort signal. */
+  getDocument(ref: DocumentRef, options: RequestOptions): Promise<Document>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   signal?: AbortSignal | undefined;
@@ -87,7 +89,7 @@ export async function pollDocflowStatus(
     if (deps.signal?.aborted) return result;
     result.polls++;
     try {
-      const doc = await deps.getDocument(ref);
+      const doc = await deps.getDocument(ref, { deadline, signal: deps.signal });
       delete result.statusError;
       if (doc.DocflowStatus) {
         result.status = doc.DocflowStatus;
@@ -95,6 +97,7 @@ export async function pollDocflowStatus(
         if (result.outcome !== 'pending') return result;
       }
     } catch (error) {
+      if (deps.signal?.aborted) return result;
       result.statusError = error;
       if (isPermanent(error)) return result;
     }
