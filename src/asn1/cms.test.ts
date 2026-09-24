@@ -64,17 +64,20 @@ describe('parseCertificate', () => {
     expect(info.notAfter.getTime()).toBeGreaterThan(info.notBefore.getTime());
   });
 
+  const name = tlv(0x30);
+  const tbs = (validity: Buffer) =>
+    tlv(
+      0x30,
+      tlv(0x30, tlv(0x02, hex('01')), tlv(0x30), name, validity, name, tlv(0x30)),
+      tlv(0x30),
+      tlv(0x03, hex('00')),
+    );
+  const utc = (s: string) => tlv(0x17, Buffer.from(s));
+  const gen = (s: string) => tlv(0x18, Buffer.from(s));
+  const notBefore = (time: Buffer) =>
+    parseCertificate(tbs(tlv(0x30, time, utc('991231000000Z')))).notBefore;
+
   it('parses GeneralizedTime and UTCTime around the 2050 pivot', () => {
-    const name = tlv(0x30);
-    const tbs = (validity: Buffer) =>
-      tlv(
-        0x30,
-        tlv(0x30, tlv(0x02, hex('01')), tlv(0x30), name, validity, name, tlv(0x30)),
-        tlv(0x30),
-        tlv(0x03, hex('00')),
-      );
-    const utc = (s: string) => tlv(0x17, Buffer.from(s));
-    const gen = (s: string) => tlv(0x18, Buffer.from(s));
     const info = parseCertificate(tbs(tlv(0x30, utc('491231235959Z'), gen('20500101000000Z'))));
     expect(info.notBefore.toISOString()).toBe('2049-12-31T23:59:59.000Z');
     expect(info.notAfter.toISOString()).toBe('2050-01-01T00:00:00.000Z');
@@ -89,9 +92,41 @@ describe('parseCertificate', () => {
     ).toThrow(Asn1Error);
   });
 
+  it('keeps a GeneralizedTime year below 100 (Date.UTC would map it to 19xx)', () => {
+    expect(notBefore(gen('00990101000000Z')).toISOString()).toBe('0099-01-01T00:00:00.000Z');
+  });
+
+  it.each([
+    ['a UTCTime text under the GeneralizedTime tag', gen('260101000000Z')],
+    ['a GeneralizedTime text under the UTCTime tag', utc('20260101000000Z')],
+    ['another tag', tlv(0x04, Buffer.from('260101000000Z'))],
+    ['bytes after the Z', utc('260101000000Z1')],
+    ['a time zone offset', utc('260101000000+0300')],
+    ['a fraction of a second', gen('20260101000000.5Z')],
+  ])('rejects %s as not an RFC 5280 time', (_name, time) => {
+    expect(() => notBefore(time)).toThrow(/notBefore is not an RFC 5280 time/);
+  });
+
+  it.each([
+    ['month 13', utc('261301000000Z')],
+    ['month 00', gen('20260001000000Z')],
+    ['30 February', utc('260230000000Z')],
+    ['hour 24', utc('260101240000Z')],
+    ['minute 60', utc('260101106000Z')],
+    ['second 60', utc('260101100060Z')],
+  ])('rejects %s as not a valid date', (_name, time) => {
+    expect(() => notBefore(time)).toThrow(/notBefore is not a valid date/);
+  });
+
   it('rejects something that is not a certificate', () => {
     expect(() => parseCertificate(hex('3003020101'))).toThrow(Asn1Error);
     expect(() => parseCertificate(cms)).toThrow(Asn1Error);
+  });
+
+  it('requires exactly three Certificate elements', () => {
+    const parts = derChildren(readDer(certificate)).map((c) => c.raw);
+    expect(() => parseCertificate(tlv(0x30, ...parts, tlv(0x05)))).toThrow(/3 elements/);
+    expect(() => parseCertificate(tlv(0x30, ...parts.slice(0, 2)))).toThrow(/3 elements/);
   });
 });
 
@@ -139,6 +174,44 @@ describe('parseCmsSignedData', () => {
     );
     expect(info.certificates).toEqual([certificate]);
     expect(info.signers).toHaveLength(1);
+  });
+
+  it('rejects a SignerIdentifier with more than issuer and serial', () => {
+    const [, sid, ...rest] = derChildren(readDer(signerInfo)).map((c) => c.raw);
+    const sidParts = derChildren(readDer(sid ?? hex('3000'))).map((c) => c.raw);
+    const extended = tlv(0x30, version, tlv(0x30, ...sidParts, hex('0500')), ...rest);
+    expect(() =>
+      parseCmsSignedData(contentInfo(version, digestAlgorithms, encap, tlv(0x31, extended))),
+    ).toThrow(/SignerIdentifier must have 2 elements/);
+  });
+
+  it('requires the SignerInfo version that matches the sid form (RFC 5652 5.3)', () => {
+    const [, sid, ...rest] = derChildren(readDer(signerInfo)).map((c) => c.raw);
+    const v3BySerial = tlv(0x30, tlv(0x02, hex('03')), sid ?? hex('3000'), ...rest);
+    const v1ByKeyId = tlv(0x30, tlv(0x02, hex('01')), tlv(0x80, hex('aabb')), ...rest);
+    for (const bad of [v3BySerial, v1ByKeyId]) {
+      expect(() =>
+        parseCmsSignedData(contentInfo(version, digestAlgorithms, encap, tlv(0x31, bad))),
+      ).toThrow(/SignerInfo version/);
+    }
+  });
+
+  it('rejects an element after signerInfos', () => {
+    expect(() =>
+      parseCmsSignedData(
+        contentInfo(version, digestAlgorithms, encap, certificates, signerInfos, tlv(0x05)),
+      ),
+    ).toThrow(/unexpected element after signerInfos/);
+  });
+
+  it('requires exactly one SignedData inside the [0] wrapper and nothing after it', () => {
+    const body = tlv(0x30, version, digestAlgorithms, encap, signerInfos);
+    expect(() => parseCmsSignedData(tlv(0x30, SIGNED_DATA_OID, tlv(0xa0, body, body)))).toThrow(
+      /unexpected elements in ContentInfo/,
+    );
+    expect(() =>
+      parseCmsSignedData(tlv(0x30, SIGNED_DATA_OID, tlv(0xa0, body), tlv(0x05))),
+    ).toThrow(/unexpected elements in ContentInfo/);
   });
 
   it('rejects a non-SignedData ContentInfo and a malformed SignedData', () => {

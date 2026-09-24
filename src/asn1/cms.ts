@@ -124,10 +124,24 @@ export function parseCmsSignedData(der: Buffer): CmsSignedDataInfo {
   };
 }
 
+/** RFC 5652 §5.3: SignerInfo version 1 goes with issuerAndSerialNumber, 3 with subjectKeyIdentifier. */
 function signerId(signerInfo: DerElement): CmsSignerId {
-  const [, sid] = derChildren(expect(signerInfo, SEQUENCE, 'SignerInfo'));
+  const [version, sid] = derChildren(expect(signerInfo, SEQUENCE, 'SignerInfo'));
+  const v = expect(version, INTEGER, 'SignerInfo version');
+  const byKeyId = sid?.tag === IMPLICIT_0;
+  if (!v.content.equals(Buffer.from([byKeyId ? 3 : 1]))) {
+    throw new Asn1Error(
+      `SignerInfo version must be ${byKeyId ? '3 with subjectKeyIdentifier' : '1 with issuerAndSerialNumber'}`,
+      v.offset,
+    );
+  }
   if (sid?.tag === IMPLICIT_0) return { subjectKeyIdentifier: sid.content };
-  const [issuer, serial] = derChildren(expect(sid, SEQUENCE, 'SignerIdentifier'));
+  const bySerial = expect(sid, SEQUENCE, 'SignerIdentifier');
+  const parts = derChildren(bySerial);
+  if (parts.length !== 2) {
+    throw new Asn1Error('SignerIdentifier must have 2 elements (issuer, serial)', bySerial.offset);
+  }
+  const [issuer, serial] = parts;
   return {
     issuer: expect(issuer, SEQUENCE, 'issuer').raw,
     serialNumber: expect(serial, INTEGER, 'serialNumber').content,

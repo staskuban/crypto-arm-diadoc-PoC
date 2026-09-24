@@ -31,7 +31,8 @@ describe('readDer', () => {
   });
 
   it('rejects indefinite lengths, trailing bytes, truncation and high tags', () => {
-    expect(() => readDer(hex('30 80 00 00'))).toThrow(Asn1Error);
+    expect(() => readDer(hex('30 80 00 00'))).toThrow(/indefinite length/);
+    expect(() => readDer(hex('04 85 00 00 00 00 01 00'))).toThrow(/length too long/);
     expect(() => readDer(hex('02 01 00 00'))).toThrow(/trailing/);
     expect(() => readDer(hex('02 05 00'))).toThrow(/exceeds/);
     expect(() => readDer(hex('1f 81 00 00'))).toThrow(/high tag/);
