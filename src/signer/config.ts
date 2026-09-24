@@ -49,8 +49,8 @@ export async function createSignerFromEnv(
 
 /**
  * Builds `ServerCmsSigner` options from env:
- * `CRYPTOARM_SERVER_URL`, `SIGNER_CERT_PATH` (public .cer), optional `CRYPTOARM_SERVER_API_KEY`
- * and `CRYPTOARM_SERVER_TIMEOUT_MS`.
+ * `CRYPTOARM_SERVER_URL`, `SIGNER_CERT_PATH` (public .cer), optional `CRYPTOARM_SERVER_API_KEY`,
+ * `CRYPTOARM_SERVER_TIMEOUT_MS` and `CRYPTOARM_SERVER_MAX_REQUEST_BYTES` (bytes, = server `JSON_LIMIT`).
  */
 export async function loadServerCmsSignerOptions(
   env: SignerEnv = process.env,
@@ -63,6 +63,8 @@ export async function loadServerCmsSignerOptions(
   if (apiKey) options.apiKey = apiKey;
   const timeoutMs = optionalTimeout(env, 'CRYPTOARM_SERVER_TIMEOUT_MS');
   if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
+  const maxRequestBytes = optionalByteLimit(env, 'CRYPTOARM_SERVER_MAX_REQUEST_BYTES');
+  if (maxRequestBytes !== undefined) options.maxRequestBytes = maxRequestBytes;
   return options;
 }
 
@@ -158,6 +160,18 @@ function optionalTimeout(env: SignerEnv, name: string): number | undefined {
     );
   }
   return timeoutMs;
+}
+
+function optionalByteLimit(env: SignerEnv, name: string): number | undefined {
+  const raw = env[name];
+  if (!raw) return undefined;
+  const bytes = Number(raw);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new SignerConfigError(
+      `${name} must be a positive integer (bytes), got ${JSON.stringify(raw)}`,
+    );
+  }
+  return bytes;
 }
 
 /** Env convention: an empty value means unset. */

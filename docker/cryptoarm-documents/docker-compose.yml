@@ -19,9 +19,20 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Read-only root filesystem (I6). Writable: the uploads and logs volumes and /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cpus: ${DOCUMENTS_API_CPUS:-1}
+    mem_limit: ${DOCUMENTS_API_MEMORY:-1g}
+    pids_limit: ${DOCUMENTS_API_PIDS:-256}
     # Secrets are read from ./secrets by start.sh (not env: they would show in `docker inspect`).
     entrypoint: ['/bin/sh', '/usr/local/bin/documents-start.sh']
-    command: ['docker-entrypoint.sh', 'pm2-runtime', 'ecosystem.config.js']
+    # Upstream runs `pm2-runtime ecosystem.config.js` (one fork-mode instance of dist/main.js). pm2
+    # keeps pids, sockets and its bundled pm2-logrotate module in /root/.pm2 of the image, so under a
+    # read-only root it would need that dir writable; the app runs directly instead (stdout = docker
+    # logs, restarts by `restart:`), see README.md.
+    command: ['docker-entrypoint.sh', 'node', 'dist/main.js']
     ports:
       # Loopback only: the API signs with the corporate keys of the КриптоАРМ Server.
       - '127.0.0.1:${DOCUMENTS_API_PORT:-3040}:3000'
@@ -64,6 +75,8 @@ services:
     volumes:
       - ./start.sh:/usr/local/bin/documents-start.sh:ro
       - documents-uploads:/uploads
+      # winston daily files (application-<date>.log, 20 MB x 14 days max), written relative to /.
+      - documents-logs:/logs
       - type: bind
         source: ./secrets
         target: /run/secrets
@@ -90,6 +103,14 @@ services:
   documents-db:
     image: ${DOCUMENTS_DB_IMAGE:-postgres:14.4}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run/postgresql:size=1m,mode=2775,uid=999,gid=999 # socket + lock (image default mode/owner)
+      - /tmp:size=64m,mode=1777
+    # 64 MB /dev/shm is Docker's default and enough for postgres' defaults on this stand.
+    cpus: ${DOCUMENTS_DB_CPUS:-1}
+    mem_limit: ${DOCUMENTS_DB_MEMORY:-512m}
+    pids_limit: ${DOCUMENTS_DB_PIDS:-128}
     environment:
       POSTGRES_USER: documents
       POSTGRES_DB: documents
@@ -113,12 +134,20 @@ services:
   ca-stub:
     image: ${DOCUMENTS_CA_STUB_IMAGE:-nginx:1.27-alpine}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=8m
+      - /run:size=1m # nginx.pid
+    cpus: ${DOCUMENTS_CA_STUB_CPUS:-0.25}
+    mem_limit: ${DOCUMENTS_CA_STUB_MEMORY:-64m}
+    pids_limit: ${DOCUMENTS_CA_STUB_PIDS:-32}
     volumes:
       - ./ca-stub/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${SIGNER_CERTS_DIR:-../cryptoarm-server/certs}:/certs:ro
 
 volumes:
   documents-uploads:
+  documents-logs:
   documents-db:
 
 networks:

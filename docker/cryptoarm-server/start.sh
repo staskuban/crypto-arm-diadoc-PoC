@@ -30,6 +30,8 @@ TSPUTIL_BIN="${TSPUTIL_BIN:-/opt/cprocsp/bin/amd64/tsputil}"
 OCSPUTIL_BIN="${OCSPUTIL_BIN:-/opt/cprocsp/bin/amd64/ocsputil}"
 CSP_STORE_DIR="${CSP_STORE_DIR:-/var/opt/cprocsp}"
 CSP_STORE_DEFAULT_DIR="${CSP_STORE_DEFAULT_DIR:-/var/opt/cprocsp_default}"
+CSP_CONFIG_DIR="${CSP_CONFIG_DIR:-/etc/opt/cprocsp}"
+CSP_CONFIG_DEFAULT_DIR="${CSP_CONFIG_DEFAULT_DIR:-/etc/opt/cprocsp_default}"
 CERTS_DIR="${CERTS_DIR:-/certs}"
 SECRETS_DIR="${SECRETS_DIR:-/run/secrets}"
 TRUSTED_LICENSE_DIR="${TRUSTED_LICENSE_DIR:-/etc/opt/Trusted/CryptoARM Server}"
@@ -109,6 +111,16 @@ install_pfx() { # <file> <pin> <label>
 if [ -z "$(ls -A "$CSP_STORE_DIR" 2>/dev/null)" ]; then
   log "seeding empty $CSP_STORE_DIR from $CSP_STORE_DEFAULT_DIR"
   cp -r "$CSP_STORE_DEFAULT_DIR"/. "$CSP_STORE_DIR"/
+fi
+# --- CSP configuration: under a read-only root filesystem it is a tmpfs (cpconfig -license -set
+# writes license.ini there), filled on every start from the copy made at image build time.
+if [ -z "$(ls -A "$CSP_CONFIG_DIR" 2>/dev/null)" ]; then
+  if [ -d "$CSP_CONFIG_DEFAULT_DIR" ]; then
+    log "seeding empty $CSP_CONFIG_DIR from $CSP_CONFIG_DEFAULT_DIR"
+    cp -pR "$CSP_CONFIG_DEFAULT_DIR"/. "$CSP_CONFIG_DIR"/
+  else
+    log "WARNING: $CSP_CONFIG_DIR is empty and $CSP_CONFIG_DEFAULT_DIR is missing; CSP will not work (image older than the compose file?)"
+  fi
 fi
 
 # --- Licenses.
