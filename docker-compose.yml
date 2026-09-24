@@ -1,5 +1,52 @@
 # Local/test environment. Service definitions live next to their Dockerfiles
-# and are pulled in via `include` (Compose >= 2.20).
+# and are pulled in via `include`. Needs Compose >= 2.24 (optional `env_file`).
 #
 include:
   - path: docker/cryptoarm-server/docker-compose.yml
+
+services:
+  # One-shot CLI, not a daemon: the profile keeps it out of `docker compose up`.
+  #   docker compose build app
+  #   docker compose run --rm app send <ИдФайл>.xml     # file from ${UTD_DIR:-./utd}
+  # (`run` reuses an existing image: after changes in src pass `--build`.)
+  app:
+    profiles: [app]
+    build:
+      context: .
+    image: kryptoarm-diadoc/app:local
+    init: true
+    depends_on:
+      cryptoarm-server:
+        condition: service_healthy
+    # App settings from the root .env (same file `npm run cli` reads); the host-side paths in it are
+    # overridden below with their in-container counterparts.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CRYPTOARM_SERVER_URL: http://cryptoarm-server:3037
+      SIGNER_CERT_PATH: /run/app/signer.cer
+      DIADOC_REFRESH_TOKEN_FILE: /var/lib/app/diadoc/refresh-token
+    volumes:
+      # Public certificate only; the private key stays in the КриптоАРМ Server store.
+      - type: bind
+        source: ${SIGNER_CERT_PATH:-./docker/cryptoarm-server/certs/cryptoarm.server.test.cer}
+        target: /run/app/signer.cer
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UTD_DIR:-./utd}
+        target: /work
+        read_only: true
+        bind:
+          create_host_path: false
+      # Writable: the CLI writes rotated refresh tokens back (write + rename in this directory).
+      - diadoc-token:/var/lib/app/diadoc
+
+volumes:
+  # The only copy of a rotating refresh token: external with a fixed name, so `down -v` never deletes
+  # it and every worktree/compose project uses the same one. Create and seed it as in .env.example.
+  diadoc-token:
+    name: kryptoarm-diadoc-diadoc-token
+    external: true

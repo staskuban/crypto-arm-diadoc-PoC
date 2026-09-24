@@ -30,3 +30,6 @@ docker/cryptoarm-server/certs/**/*.cer
 *.tmp
 # Public test data (CMS of fixture bytes, no keys)
 !src/asn1/fixtures/*.der
+
+# УПД files mounted into the app container (UTD_DIR default); real documents carry business data
+/utd/
