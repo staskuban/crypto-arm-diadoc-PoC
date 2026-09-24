@@ -1,7 +1,7 @@
 // DIADOC_REFRESH_TOKEN_FILE: the refresh token may rotate on every exchange, and the old one may be
 // dead right away, so a rotated token must reach the disk durably, and only one process may use it.
-import { constants } from 'node:fs';
-import { access, lstat, open, readFile, rename, unlink } from 'node:fs/promises';
+import { constants, unlinkSync } from 'node:fs';
+import { access, lstat, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { dirname } from 'node:path';
 
@@ -14,20 +14,36 @@ export interface WriteRefreshTokenFileOptions {
   syncDir?: (dir: string) => Promise<void>;
 }
 
+export interface LockRefreshTokenFileOptions {
+  /** Non-fatal findings (a left-over temp file). */
+  warn?: (message: string) => void;
+  /** For tests: the device id of a path (`st_dev`). */
+  deviceOf?: (path: string) => Promise<number | bigint>;
+}
+
 export interface RefreshTokenFileLock {
   readonly lockPath: string;
   /** Removes the lock file; safe to call more than once. */
   release(): Promise<void>;
+  /**
+   * Removes the lock file synchronously, for a process that exits right away (second signal); never
+   * throws for a missing file. `release` afterwards is a no-op.
+   */
+  releaseSync(): void;
 }
 
 /**
  * Checks that the token file can be replaced and takes `<file>.lock` (O_EXCL) for the whole run: two
  * processes exchanging one refresh token would invalidate each other's. Take it before reading the
  * token. A lock left by a killed process (kill -9, OOM, `docker stop` after its grace period) has to
- * be deleted by hand; it records pid, host and start time to tell whose it is.
+ * be deleted by hand; it records pid, host and start time to tell whose it is. Warns when a
+ * `<file>.tmp` from a failed earlier write-back exists: it may hold a newer token than the file.
  */
-export async function lockRefreshTokenFile(tokenFile: string): Promise<RefreshTokenFileLock> {
-  await checkReplaceable(tokenFile);
+export async function lockRefreshTokenFile(
+  tokenFile: string,
+  o: LockRefreshTokenFileOptions = {},
+): Promise<RefreshTokenFileLock> {
+  await checkReplaceable(tokenFile, o.deviceOf ?? deviceOf);
   const lockPath = `${tokenFile}.lock`;
   let handle;
   try {
@@ -56,16 +72,37 @@ export async function lockRefreshTokenFile(tokenFile: string): Promise<RefreshTo
     await unlink(lockPath).catch(() => undefined);
     throw new DiadocConfigError(`cannot write the lock file ${lockPath}`, { cause: error });
   }
+  const tmp = `${tokenFile}.tmp`;
+  if (
+    await lstat(tmp).then(
+      () => true,
+      () => false,
+    )
+  ) {
+    o.warn?.(
+      `${tmp} exists: an earlier run could not replace ${tokenFile}, so it may hold a newer ` +
+        `refresh token than the file. If this run fails with invalid_grant, stop and move it over ` +
+        `${tokenFile}; the next token rotation removes it`,
+    );
+  }
   let released = false;
+  const releaseSync = (): void => {
+    if (released) return;
+    released = true;
+    try {
+      unlinkSync(lockPath);
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') throw error;
+    }
+  };
   return {
     lockPath,
-    async release() {
-      if (released) return;
-      released = true;
-      await unlink(lockPath).catch((error: unknown) => {
-        if (errorCode(error) !== 'ENOENT') throw error;
-      });
+    // Synchronous inside, so a releaseSync racing with it never returns before the file is gone.
+    release: async () => {
+      releaseSync();
+      return Promise.resolve();
     },
+    releaseSync,
   };
 }
 
@@ -135,7 +172,14 @@ async function syncDir(dir: string): Promise<void> {
   }
 }
 
-async function checkReplaceable(tokenFile: string): Promise<void> {
+async function deviceOf(path: string): Promise<number> {
+  return (await stat(path)).dev;
+}
+
+async function checkReplaceable(
+  tokenFile: string,
+  device: (path: string) => Promise<number | bigint>,
+): Promise<void> {
   const prefix = `DIADOC_REFRESH_TOKEN_FILE ${tokenFile}`;
   let stats;
   try {
@@ -155,6 +199,14 @@ async function checkReplaceable(tokenFile: string): Promise<void> {
     throw new DiadocConfigError(`${prefix}: the file and its directory must be writable`, {
       cause: error,
     });
+  }
+  // A file mounted on its own (docker `-v host-file:/path`) is a mount point: rename() over it fails
+  // with EBUSY, but only at the first rotation, after the IdP has already replaced the token.
+  if ((await device(tokenFile)) !== (await device(dirname(tokenFile)))) {
+    throw new DiadocConfigError(
+      `${prefix} is a mount point (a single-file bind mount?); a rotated token cannot replace it ` +
+        'there: mount its directory instead',
+    );
   }
 }
 

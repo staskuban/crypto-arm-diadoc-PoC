@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_RETRY_POLICY,
   fetchWithRetry,
+  isConnectPhaseError,
   isTransientFetchError,
   type RetryPolicy,
 } from './http-retry.js';
@@ -177,5 +178,36 @@ describe('isTransientFetchError', () => {
     ['not an error', 'fetch failed', false],
   ])('%s → %s', (_name, error, expected) => {
     expect(isTransientFetchError(error)).toBe(expected);
+  });
+});
+
+describe('isConnectPhaseError', () => {
+  const failed = (cause: Error): TypeError => new TypeError('fetch failed', { cause });
+  const coded = (code: string): Error => Object.assign(new Error(code), { code });
+
+  it.each(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'a %s before the request was sent',
+    (code) => {
+      expect(isConnectPhaseError(failed(coded(code)))).toBe(true);
+    },
+  );
+
+  it('an AggregateError of refused addresses (happy eyeballs)', () => {
+    const refused = Object.assign(new AggregateError([coded('ECONNREFUSED')], ''), {
+      code: 'ECONNREFUSED',
+    });
+    expect(isConnectPhaseError(failed(refused))).toBe(true);
+  });
+
+  it.each([
+    ['a reset', failed(coded('ECONNRESET'))],
+    ['no route on a reused socket', failed(coded('EHOSTUNREACH'))],
+    ['no network on a reused socket', failed(coded('ENETUNREACH'))],
+    ['a socket closed mid-request', failed(coded('UND_ERR_SOCKET'))],
+    ['a timeout', new DOMException('timed out', 'TimeoutError')],
+    ['no code', failed(new Error('other side closed'))],
+    ['not a fetch failure', coded('ECONNREFUSED')],
+  ])('not %s', (_name, error) => {
+    expect(isConnectPhaseError(error)).toBe(false);
   });
 });

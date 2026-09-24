@@ -28,14 +28,18 @@ export class DiadocConflictError extends DiadocError {
   }
 }
 
-/** PostMessage kept answering 204 (operation in progress) for all allowed attempts. */
+/**
+ * PostMessage kept answering 204 (operation in progress) for all allowed attempts, or until the next
+ * pause would reach its time budget (`budgetMs`).
+ */
 export class DiadocOperationPendingError extends Error {
   readonly operationId: string;
   readonly attempts: number;
 
-  constructor(operationId: string, attempts: number) {
+  constructor(operationId: string, attempts: number, budgetMs?: number) {
     super(
-      `Diadoc PostMessage operation ${operationId} still in progress after ${String(attempts)} attempts`,
+      `Diadoc PostMessage operation ${operationId} still in progress after ${String(attempts)} attempts` +
+        (budgetMs === undefined ? '' : ` (time budget of ${String(budgetMs / 1000)} s)`),
     );
     this.name = 'DiadocOperationPendingError';
     this.operationId = operationId;

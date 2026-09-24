@@ -298,3 +298,96 @@ describe('RefreshTokenAuth', () => {
     await expect(auth.getAccessToken()).rejects.toBeInstanceOf(DiadocAuthError);
   });
 });
+
+describe('RefreshTokenAuth deadline and abort (R2 minor 8)', () => {
+  it('does not wait for a Retry-After that leaves no time for a request before the deadline', async () => {
+    const { auth, calls, clock, slept } = makeAuth(
+      [
+        new Response('slow down', { status: 429, headers: { 'retry-after': '40' } }),
+        tokenResponse('AT1'),
+      ],
+      { timeoutMs: 30_000 },
+    );
+    const err = await auth.getAccessToken({ deadline: clock.t + 60_000 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocAuthError);
+    expect(err).toMatchObject({ status: 429 });
+    expect(calls).toHaveLength(1);
+    expect(slept).toEqual([]);
+  });
+
+  it('does not start a token request that could not end before the deadline', async () => {
+    const { auth, calls, clock } = makeAuth([tokenResponse('AT1')], { timeoutMs: 30_000 });
+    const err = await auth.getAccessToken({ deadline: clock.t + 29_999 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiadocAuthError);
+    expect((err as Error).message).toMatch(/not asked.*30 s.*deadline/);
+    expect(calls).toHaveLength(0);
+    expect(await auth.getAccessToken({ deadline: clock.t + 30_000 })).toBe('AT1');
+  });
+
+  it('never cuts a token request with the deadline: it runs with its own full timeout', async () => {
+    const { auth, calls, clock } = makeAuth([tokenResponse('AT1')], { timeoutMs: 30_000 });
+    await auth.getAccessToken({ deadline: clock.t + 30_000 });
+    const signal = calls[0]?.init.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it('a cached token is returned even past the deadline', async () => {
+    const { auth, clock } = makeAuth([tokenResponse('AT1')]);
+    await auth.getAccessToken();
+    expect(await auth.getAccessToken({ deadline: clock.t - 1 })).toBe('AT1');
+  });
+
+  it('an abort does not cut a sent token request: the rotated token is persisted first', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGTERM)');
+    let answer: (res: Response) => void = () => undefined;
+    const persisted: string[] = [];
+    const auth = new RefreshTokenAuth({
+      clientId: 'CID',
+      clientSecret: 'SECRET',
+      refreshToken: 'RT0',
+      fetch: (_input, init) =>
+        new Promise((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal?.reason as Error);
+          });
+          answer = resolve;
+        }),
+      onRefreshTokenRotated: (token) => {
+        persisted.push(token);
+      },
+    });
+    const pending = auth.getAccessToken({ signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(reason);
+    answer(tokenResponse('AT1', 'RT1'));
+    expect(await pending).toBe('AT1');
+    expect(persisted).toEqual(['RT1']);
+  });
+
+  it('an abort stops a retry pause with the signal reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGINT)');
+    const { auth } = makeAuth(
+      [new Response('unavailable', { status: 503, headers: { 'retry-after': '1' } })],
+      {
+        sleep: (_ms, signal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted', 'AbortError'));
+            });
+            controller.abort(reason);
+          }),
+      },
+    );
+    await expect(auth.getAccessToken({ signal: controller.signal })).rejects.toBe(reason);
+  });
+
+  it('an already aborted signal makes no request', async () => {
+    const { auth, calls } = makeAuth([tokenResponse('AT1')]);
+    const reason = new Error('stop');
+    await expect(auth.getAccessToken({ signal: AbortSignal.abort(reason) })).rejects.toBe(reason);
+    expect(calls).toHaveLength(0);
+  });
+});

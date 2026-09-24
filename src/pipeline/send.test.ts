@@ -114,6 +114,8 @@ class FakeDiadoc implements PipelineDiadoc {
   posts: { message: MessageToPost; options: PostMessageOptions }[] = [];
   refs: DocumentRef[] = [];
   getOptions: (RequestOptions | undefined)[] = [];
+  canPostOptions: (RequestOptions | undefined)[] = [];
+  onCanPostMessage: (() => Promise<MessageValidationResult>) | undefined;
   onGetDocument: (() => Promise<Document>) | undefined;
   onShelfUpload: (() => Promise<string>) | undefined;
 
@@ -123,9 +125,11 @@ class FakeDiadoc implements PipelineDiadoc {
   /** One entry per GetDocument call; the last one repeats. */
   documents: (Document | Error)[] = [{ DocflowStatus: status('Success', 'Подписан') }];
 
-  canPostMessage(p: MessagePrototype): Promise<MessageValidationResult> {
+  canPostMessage(p: MessagePrototype, options?: RequestOptions): Promise<MessageValidationResult> {
     this.calls.push('canPostMessage');
     this.prototypes.push(p);
+    this.canPostOptions.push(options);
+    if (this.onCanPostMessage) return this.onCanPostMessage();
     return settle(this.canPostResult);
   }
 
@@ -303,6 +307,22 @@ describe('sendUtd shelf upload', () => {
     await expect(run({ fileName: FILE_NAME, content: padded(600_000) })).rejects.toBe(reason);
     expect(diadoc.uploads[0]?.options?.signal).toBe(controller.signal);
     expect(diadoc.calls).not.toContain('postMessage');
+  });
+});
+
+describe('sendUtd precheck abort', () => {
+  it('passes the abort signal to CanPostMessage and rethrows its reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGTERM)');
+    const { diadoc, run } = setup({ signal: controller.signal });
+    diadoc.onCanPostMessage = () => {
+      controller.abort(reason);
+      // An aborted retry pause rejects with its own AbortError, not the reason.
+      return Promise.reject(new DOMException('This operation was aborted', 'AbortError'));
+    };
+    await expect(run()).rejects.toBe(reason);
+    expect(diadoc.canPostOptions).toEqual([{ signal: controller.signal }]);
+    expect(diadoc.calls).toEqual(['canPostMessage']);
   });
 });
 

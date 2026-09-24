@@ -81,11 +81,10 @@ export interface SendUtdOptions {
   resend?: string;
   resolveVersion?: ParseUtdOptions['resolveVersion'];
   /**
-   * Checked between steps and passed to the signer, the shelf upload (between parts too) and
-   * GetDocument. CanPostMessage and PostMessage are not interrupted (PostMessage may wait through its
-   * bounded retries). Before
-   * PostMessage an abort rejects with the signal's reason; after it, polling stops and the result is
-   * returned.
+   * Checked between steps and passed to the signer, CanPostMessage, the shelf upload (between parts
+   * too) and GetDocument. PostMessage is not interrupted: it ends within its time budget
+   * (POST_MESSAGE_BUDGET_MS). Before PostMessage an abort rejects with the signal's reason; after it,
+   * polling stops and the result is returned.
    */
   signal?: AbortSignal;
 }
@@ -230,9 +229,17 @@ export async function sendUtd(
   const warnings: MessageValidationError[] = [];
   if (options.precheck ?? true) {
     signal?.throwIfAborted();
-    const check = await stepAsync('precheck', 'PRECHECK_FAILED', () =>
-      deps.diadoc.canPostMessage(toMessagePrototype(fromBoxId, toBoxId, attachment)),
-    );
+    const check = await stepAsync('precheck', 'PRECHECK_FAILED', async () => {
+      try {
+        return await deps.diadoc.canPostMessage(
+          toMessagePrototype(fromBoxId, toBoxId, attachment),
+          callOptions,
+        );
+      } catch (error) {
+        // An aborted retry pause rejects with its own AbortError, not the signal's reason.
+        throw signal?.aborted ? signal.reason : error;
+      }
+    });
     const blocking: MessageValidationError[] = [];
     for (const e of check.Errors ?? []) (isBlocking(e) ? blocking : warnings).push(e);
     if (blocking.length > 0) {

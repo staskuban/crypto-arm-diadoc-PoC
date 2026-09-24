@@ -11,7 +11,9 @@ import {
   onRefreshTokenRotated,
   type CliDeps,
   type CliEnv,
+  type RunState,
 } from './cli.js';
+import { POST_MESSAGE_BUDGET_MS, SHELF_MAX_BYTES, type Message } from './diadoc/index.js';
 import type { PipelineDiadoc, SendUtdResult } from './pipeline/index.js';
 import { PipelineError } from './pipeline/index.js';
 import type { Signer } from './signer/index.js';
@@ -47,6 +49,8 @@ function setup(send: CliDeps['send'] = () => Promise.resolve(RESULT), env: CliEn
       path === '/data/f.xml'
         ? Promise.resolve(Buffer.from('bytes'))
         : Promise.reject(new Error(`ENOENT: ${path}`)),
+    fileSize: (path) =>
+      path === '/data/f.xml' ? Promise.resolve(5) : Promise.reject(new Error(`ENOENT: ${path}`)),
     stdout: (s) => out.push(s),
     stderr: (s) => err.push(s),
     createSigner: () => Promise.resolve({} as Signer),
@@ -71,6 +75,55 @@ describe('cli', () => {
     expect(await main(['send'], deps)).toBe(EXIT.usage);
     expect(await main(['send', 'a.xml', '--bogus'], deps)).toBe(EXIT.usage);
     expect(await main(['send', 'a.xml', '-x'], deps)).toBe(EXIT.usage);
+  });
+
+  it('takes everything after -- as the file, so a name may start with -', async () => {
+    const { deps, sent } = setup();
+    const read: string[] = [];
+    deps.fileSize = () => Promise.resolve(5);
+    deps.readFile = (path) => {
+      read.push(path);
+      return Promise.resolve(Buffer.from('bytes'));
+    };
+    expect(await main(['send', '--no-precheck', '--', '-f.xml'], deps)).toBe(EXIT.ok);
+    expect(read).toEqual(['-f.xml']);
+    expect(sent[0]).toMatchObject({ fileName: '-f.xml', precheck: false });
+  });
+
+  it.each([
+    [['send', '--', 'a.xml', '--no-precheck']],
+    [['send', '--', 'a.xml', 'b.xml']],
+    [['send', '--']],
+    [['send', 'a.xml', '--', 'b.xml']],
+  ])('%j is usage', async (argv) => {
+    const { deps, sent } = setup();
+    expect(await main(argv, deps)).toBe(EXIT.usage);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a file above the shelf maximum by its size, before reading it', async () => {
+    const { deps, err, sent } = setup();
+    const read: string[] = [];
+    deps.fileSize = () => Promise.resolve(SHELF_MAX_BYTES + 1);
+    deps.readFile = (path) => {
+      read.push(path);
+      return Promise.resolve(Buffer.from('bytes'));
+    };
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(
+      new RegExp(
+        `^error \\[CONTENT_TOO_LARGE\\] .*f\\.xml is ${String(SHELF_MAX_BYTES + 1)} bytes`,
+      ),
+    );
+    expect(read).toEqual([]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a failing size check is READ_FAILED', async () => {
+    const { deps, err } = setup();
+    deps.fileSize = () => Promise.reject(new Error('EACCES: permission denied'));
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[READ_FAILED\] EACCES/);
   });
 
   it('--help exits 0', async () => {
@@ -296,11 +349,209 @@ describe('refresh token persistence', () => {
 });
 
 describe('interrupt', () => {
-  it('first signal aborts and says the current step finishes first', () => {
+  it('first signal aborts and says PostMessage finishes within its budget', () => {
     const controller = new AbortController();
     const err: string[] = [];
-    interruptHandler(controller, (s) => err.push(s))('SIGINT');
+    const exits: number[] = [];
+    interruptHandler(
+      controller,
+      (t) => err.push(t),
+      {},
+      (code) => exits.push(code),
+    )('SIGINT');
     expect(controller.signal.aborted).toBe(true);
-    expect(err.join('')).toMatch(/after the current step.*again/);
+    expect(err.join('')).toMatch(/after the current step.*again/s);
+    expect(err.join('')).toContain(`${String(POST_MESSAGE_BUDGET_MS / 1000)} s`);
+    expect(exits).toEqual([]);
+  });
+
+  it('second signal removes the lock synchronously, prints the operationId and exits', () => {
+    const controller = new AbortController();
+    const err: string[] = [];
+    const exits: number[] = [];
+    const released: string[] = [];
+    const state: RunState = {
+      operationId: 'op-7',
+      releaseLockSync: () => released.push('lock'),
+    };
+    const handler = interruptHandler(
+      controller,
+      (t) => err.push(t),
+      state,
+      (code) => exits.push(code),
+    );
+    handler('SIGTERM');
+    handler('SIGTERM');
+    expect(released).toEqual(['lock']);
+    expect(err.join('')).toMatch(/operationId op-7.*may have been posted.*look it up/s);
+    expect(exits).toEqual([143]);
+  });
+
+  it('second signal before PostMessage says nothing was posted; SIGINT exits 130', () => {
+    const err: string[] = [];
+    const exits: number[] = [];
+    const handler = interruptHandler(
+      new AbortController(),
+      (t) => err.push(t),
+      {},
+      (code) => exits.push(code),
+    );
+    handler('SIGINT');
+    handler('SIGINT');
+    expect(err.join('')).toMatch(/nothing was posted/);
+    expect(exits).toEqual([130]);
+  });
+
+  it('second signal after the post prints messageId too; a failing unlink is only a warning', () => {
+    const err: string[] = [];
+    const exits: number[] = [];
+    const state: RunState = {
+      operationId: 'op-7',
+      messageId: 'm-1',
+      releaseLockSync: () => {
+        throw new Error('EROFS');
+      },
+    };
+    const handler = interruptHandler(
+      new AbortController(),
+      (t) => err.push(t),
+      state,
+      (code) => exits.push(code),
+    );
+    handler('SIGTERM');
+    handler('SIGINT');
+    expect(err.join('')).toMatch(/operationId op-7, messageId m-1/);
+    expect(err.join('')).toMatch(/warning: .*EROFS/);
+    expect(exits).toEqual([130]);
+  });
+});
+
+describe('second signal while a rotated token is being saved', () => {
+  it('names the temp file that may hold the new token', () => {
+    const err: string[] = [];
+    const handler = interruptHandler(
+      new AbortController(),
+      (t) => err.push(t),
+      { savingTokenFile: '/v/rt' },
+      () => undefined,
+    );
+    handler('SIGTERM');
+    handler('SIGTERM');
+    expect(err.join('')).toMatch(/rotated refresh token was being saved.*\/v\/rt\.tmp/s);
+  });
+
+  it('onRefreshTokenRotated marks the save in the run state while it runs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'old\n');
+    const state: RunState = {};
+    const saving = onRefreshTokenRotated(file, () => undefined, state)('new-token');
+    expect(state.savingTokenFile).toBe(file);
+    await saving;
+    expect(state.savingTokenFile).toBeUndefined();
+  });
+});
+
+describe('run state for the second signal', () => {
+  const posted: Message = { MessageId: 'm-1' };
+
+  it('records the operationId when PostMessage starts and the messageId when it answers', async () => {
+    const state: RunState = {};
+    const seen: RunState[] = [];
+    const { deps } = setup(async (_input, d) => {
+      const message = d.diadoc.postMessage(
+        { FromBoxId: 'from', ToBoxId: 'to', DocumentAttachments: [] },
+        { operationId: 'op-7' },
+      );
+      seen.push({ ...state });
+      await message;
+      seen.push({ ...state });
+      return RESULT;
+    });
+    deps.state = state;
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        postMessage: () => Promise.resolve(posted),
+      } as unknown as PipelineDiadoc);
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(seen[0]).toMatchObject({ operationId: 'op-7' });
+    expect(seen[0]?.messageId).toBeUndefined();
+    expect(seen[1]).toMatchObject({ operationId: 'op-7', messageId: 'm-1' });
+  });
+
+  it('can remove the lock as soon as it is taken, before the Diadoc config is read', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    const state: RunState = {};
+    const env = {
+      ...ENV,
+      DIADOC_API_URL: 'https://diadoc-api-staging.kontur.ru',
+      DIADOC_CLIENT_ID: '',
+      DIADOC_REFRESH_TOKEN_FILE: file,
+    };
+    const { deps } = setup(undefined, env);
+    delete deps.createDiadoc;
+    deps.state = state;
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.failed);
+    // The config failed after the lock was taken: releaseLockSync was set by then.
+    expect(state.releaseLockSync).toBeTypeOf('function');
+  });
+
+  it('can remove the real refresh-token lock synchronously while sending', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    const state: RunState = {};
+    let lockGone = false;
+    const { deps } = setup(
+      async () => {
+        state.releaseLockSync?.();
+        lockGone = await access(`${file}.lock`).then(
+          () => false,
+          () => true,
+        );
+        return RESULT;
+      },
+      {
+        ...ENV,
+        DIADOC_API_URL: 'https://diadoc-api-staging.kontur.ru',
+        DIADOC_CLIENT_ID: 'cid',
+        DIADOC_CLIENT_SECRET: 'secret',
+        DIADOC_REFRESH_TOKEN_FILE: file,
+      },
+    );
+    delete deps.createDiadoc;
+    deps.state = state;
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(lockGone).toBe(true);
+  });
+
+  it('warns at start about a left-over refresh-token temp file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-rt-'));
+    const file = join(dir, 'rt');
+    await writeFile(file, 'rt\n', { mode: 0o600 });
+    await writeFile(`${file}.tmp`, 'tmp-token-value\n', { mode: 0o600 });
+    const { deps, err } = setup(undefined, {
+      ...ENV,
+      DIADOC_API_URL: 'https://diadoc-api-staging.kontur.ru',
+      DIADOC_CLIENT_ID: 'cid',
+      DIADOC_CLIENT_SECRET: 'secret',
+      DIADOC_REFRESH_TOKEN_FILE: file,
+    });
+    delete deps.createDiadoc;
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(err.join('')).toContain(`warning: ${file}.tmp`);
+    expect(err.join('')).not.toContain('tmp-token-value');
+  });
+});
+
+describe('docker compose app service', () => {
+  it('stop_grace_period covers the PostMessage time budget plus a margin', async () => {
+    const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+    const app = /^ {2}app:\n((?: {4}.*\n|\s*\n)+)/m.exec(compose)?.[1] ?? '';
+    const grace = /^ {4}stop_grace_period: (\d+)s$/m.exec(app)?.[1];
+    expect(grace).toBeDefined();
+    expect(Number(grace) * 1000).toBeGreaterThanOrEqual(POST_MESSAGE_BUDGET_MS + 15_000);
   });
 });

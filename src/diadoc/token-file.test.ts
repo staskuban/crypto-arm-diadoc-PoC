@@ -144,4 +144,46 @@ describe('lockRefreshTokenFile', () => {
       /the file and its directory must be writable/,
     );
   });
+
+  it('releaseSync removes the lock at once (second signal) and release stays safe', async () => {
+    const { file } = await tokenFile();
+    const lock = await lockRefreshTokenFile(file);
+    lock.releaseSync();
+    await expect(stat(lock.lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    lock.releaseSync();
+    await lock.release();
+  });
+
+  it('warns about a left-over temp file that may hold a newer token, without its content', async () => {
+    const { file } = await tokenFile();
+    await writeFile(`${file}.tmp`, 'newer-secret-token\n', { mode: 0o600 });
+    const warnings: string[] = [];
+    const lock = await lockRefreshTokenFile(file, { warn: (m) => warnings.push(m) });
+    expect(warnings.join('')).toContain(`${file}.tmp`);
+    expect(warnings.join('')).toMatch(/newer refresh token.*move it over/s);
+    expect(warnings.join('')).not.toContain('newer-secret-token');
+    await lock.release();
+  });
+
+  it('does not warn without a temp file', async () => {
+    const { file } = await tokenFile();
+    const warnings: string[] = [];
+    await (await lockRefreshTokenFile(file, { warn: (m) => warnings.push(m) })).release();
+    expect(warnings).toEqual([]);
+  });
+
+  it('refuses a file on another device than its directory (single-file bind mount)', async () => {
+    const { dir, file } = await tokenFile();
+    const error = await lockRefreshTokenFile(file, {
+      deviceOf: (path) => Promise.resolve(path === dir ? 1 : 2),
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DiadocConfigError);
+    expect((error as Error).message).toMatch(/mount point.*mount its directory/);
+    await expect(stat(`${file}.lock`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('accepts a file on the same device as its directory', async () => {
+    const { file } = await tokenFile();
+    await (await lockRefreshTokenFile(file)).release();
+  });
 });
