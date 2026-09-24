@@ -1,0 +1,17 @@
+{
+  "name": "spike-diadoc",
+  "private": true,
+  "type": "module",
+  "description": "S1 spike: Diadoc staging auth, document types, PostMessage of a УПД, DocflowStatus",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "diadoc": "node src/cli.ts",
+    "fixture": "node src/cli.ts fixture"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
