@@ -1,0 +1,4 @@
+.env
+.state/
+out/
+node_modules/
