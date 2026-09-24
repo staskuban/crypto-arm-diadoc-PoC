@@ -18,8 +18,14 @@ import {
   readSignerCertificate,
   verifiedSignerViolations,
 } from '../pipeline/signature-policy.js';
-import { createSignerFromEnv, loadDocumentsCloudSignerEnv } from './config.js';
+import {
+  createSignerFromEnv,
+  loadDocumentsCloudSignerEnv,
+  loadServerCmsSignerOptions,
+} from './config.js';
 import { DocumentsCloudSigner } from './documents-cloud-signer.js';
+import { SignerPayloadTooLargeError } from './errors.js';
+import { ServerCmsSigner } from './server-cms-signer.js';
 import type { Signer } from './signer.js';
 
 const enabled = Boolean(process.env.DOCUMENTS_URL);
@@ -129,6 +135,49 @@ describe.skipIf(!enabled)('DocumentsCloudSigner against КриптоАРМ До�
       const signer = new DocumentsCloudSigner({ ...options, auth: { jwt: token }, verifier });
       const { signature } = await signer.sign(CONTENT);
       expect(cmsPolicyViolations(signature, readSignerCertificate(signer.certificate))).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'D50: refuses data too large to verify before uploading; the stand relays JSON_LIMIT and MAX_FILE_SIZE',
+    async () => {
+      const options = await loadDocumentsCloudSignerEnv();
+      const server = new ServerCmsSigner(await loadServerCmsSignerOptions());
+      const calls: string[] = [];
+      const countingFetch: typeof fetch = (input, init) => {
+        calls.push(input instanceof URL ? input.pathname : 'other');
+        return fetch(input, init);
+      };
+      // Base64 of 40 000 000 B is 53 333 336 B: over the server's 50 MiB JSON_LIMIT.
+      const big = Buffer.alloc(40_000_000, 0x41);
+
+      const guarded = new DocumentsCloudSigner({
+        ...options,
+        verifier: server,
+        fetch: countingFetch,
+      });
+      const refused = await guarded.sign(big).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(SignerPayloadTooLargeError);
+      expect(refused).toMatchObject({ status: undefined, limitBytes: server.maxRequestBytes });
+      expect(calls).toEqual([]); // not even the login
+
+      // Without the verifier's limit the file is uploaded and cloud-sign relays the server's 400.
+      const unguarded = new DocumentsCloudSigner({
+        ...options,
+        verifier: { verify: (...args) => server.verify(...args) },
+      });
+      const relayed = await unguarded.sign(big).catch((e: unknown) => e);
+      expect(relayed).toBeInstanceOf(SignerPayloadTooLargeError);
+      expect(relayed).toMatchObject({ status: 400 });
+      expect((relayed as Error).message).toMatch(/^sign: cloud-sign of 40000000 B rejected/);
+
+      // MAX_FILE_SIZE=50 (MiB) on the stand: a file of exactly 50 MiB is refused with 413.
+      const tooBig = Buffer.alloc(52_428_800, 0x41);
+      const rejected = await unguarded.sign(tooBig).catch((e: unknown) => e);
+      expect(rejected).toBeInstanceOf(SignerPayloadTooLargeError);
+      expect(rejected).toMatchObject({ status: 413 });
+      expect((rejected as Error).message).toMatch(/^sign: upload of 52428800 B rejected/);
     },
     TIMEOUT,
   );

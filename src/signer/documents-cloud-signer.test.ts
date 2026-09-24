@@ -4,13 +4,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   DocumentsCloudSigner,
+  VERIFY_SIGNATURE_MARGIN_BYTES,
   type DocumentsCloudSignerOptions,
 } from './documents-cloud-signer.js';
+import { ServerCmsSigner } from './server-cms-signer.js';
 import {
   SignerConfigError,
   SignerHttpError,
   SignerKeyNotFoundError,
   SignerNetworkError,
+  SignerPayloadTooLargeError,
   SignerResponseError,
   SignerTimeoutError,
 } from './errors.js';
@@ -700,5 +703,367 @@ describe('DocumentsCloudSigner.verify', () => {
     await expect(signer.verify(data, serverDer, { signal })).resolves.toBe(result);
     expect(verifier.verify).toHaveBeenLastCalledWith(data, serverDer, { signal });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/** A 2xx response whose body stalls until the request signal aborts, then fails with its reason. */
+function stalledBody(call: Call): Response {
+  const { signal } = call.init;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        controller.error(signal.reason);
+      });
+    },
+  });
+  return new Response(body, { status: 201 });
+}
+
+describe('DocumentsCloudSigner errors name the step and the root cause', () => {
+  it('maps a response body that stalls past the timeout to SignerTimeoutError naming the step', async () => {
+    const { signer } = setup(
+      { ...signingRoutes(), 'POST /api/v1/signatures/cloud-sign/42': stalledBody },
+      { timeoutMs: 20 },
+    );
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerTimeoutError);
+    expect(error).toMatchObject({ operation: 'sign', step: 'cloud-sign', timeoutMs: 20 });
+    expect((error as Error).message).toBe(
+      'sign: cloud-sign: response body not complete within 20 ms',
+    );
+  });
+
+  it('names the step of a request that timed out', async () => {
+    const { signer } = setup(
+      {
+        ...signingRoutes(),
+        'POST /api/v1/documents/42/signature': () => {
+          throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        },
+      },
+      { timeoutMs: 1234 },
+    );
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerTimeoutError);
+    expect((error as Error).message).toBe('sign: export: no response within 1234 ms');
+  });
+
+  it('names the step and the root cause of a network failure', async () => {
+    const cause = new TypeError('fetch failed', {
+      cause: new Error('connect ECONNREFUSED 127.0.0.1:3040'),
+    });
+    const { signer } = setup({
+      'POST /api/v1/documents/upload': () => {
+        throw cause;
+      },
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerNetworkError);
+    expect(error).toMatchObject({ operation: 'sign', step: 'upload', cause });
+    expect((error as Error).message).toBe(
+      'sign: upload: request failed: fetch failed: connect ECONNREFUSED 127.0.0.1:3040',
+    );
+  });
+
+  it('tells a refused redirect apart from other network failures', async () => {
+    const { signer } = setup({
+      'POST /api/v1/documents/upload': () => {
+        throw new TypeError('fetch failed', { cause: new Error('unexpected redirect') });
+      },
+    });
+    const error = await rejection(signer.sign(data));
+    expect((error as Error).message).toBe(
+      'sign: upload: request failed: fetch failed: unexpected redirect',
+    );
+  });
+
+  it('lists every address of an AggregateError root cause (localhost resolves to ::1 and 127.0.0.1)', async () => {
+    const refused = Object.assign(
+      new AggregateError(
+        [
+          new Error('connect ECONNREFUSED ::1:3040'),
+          new Error('connect ECONNREFUSED 127.0.0.1:3040'),
+        ],
+        '',
+      ),
+      { code: 'ECONNREFUSED' },
+    );
+    const { signer } = setup({
+      'POST /api/v1/documents/upload': () => {
+        throw new TypeError('fetch failed', { cause: refused });
+      },
+    });
+    const error = await rejection(signer.sign(data));
+    expect((error as Error).message).toBe(
+      'sign: upload: request failed: fetch failed: connect ECONNREFUSED ::1:3040, connect ECONNREFUSED 127.0.0.1:3040',
+    );
+  });
+
+  it('names the step and the root cause when reading a body fails', async () => {
+    const closed = new TypeError('terminated', { cause: new Error('other side closed') });
+    const { signer } = setup({
+      ...signingRoutes(),
+      'POST /api/v1/documents/42/signature': () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(closed);
+            },
+          }),
+          { status: 201 },
+        ),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerNetworkError);
+    expect(error).toMatchObject({ step: 'export', cause: closed });
+    expect((error as Error).message).toBe(
+      'sign: export: reading the response failed: terminated: other side closed',
+    );
+  });
+
+  it('rethrows the caller abort reason when it aborts while a body is read', async () => {
+    const controller = new AbortController();
+    const reason = new Error('shutdown');
+    const { signer } = setup({
+      ...signingRoutes(),
+      'POST /api/v1/signatures/cloud-sign/42': (call) => {
+        const response = stalledBody(call);
+        setTimeout(() => {
+          controller.abort(reason);
+        }, 5);
+        return response;
+      },
+    });
+    await expect(signer.sign(data, { signal: controller.signal })).rejects.toBe(reason);
+  });
+
+  it('does not treat a 5xx with the "private key not found" text as SignerKeyNotFoundError', async () => {
+    const { signer, calls } = setup({
+      ...signingRoutes(),
+      'POST /api/v1/signatures/cloud-sign/42': () =>
+        apiError(500, 'internal', 'Закрытый ключ для переданного сертификата не найден'),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerHttpError);
+    expect(error).not.toBeInstanceOf(SignerKeyNotFoundError);
+    expect(calls.filter((c) => c.path === '/api/v1/signatures/cloud-sign/42')).toHaveLength(4);
+  });
+
+  it('explains a "repeated signature" answer to cloud-sign (an earlier attempt stored it, D15)', async () => {
+    const { signer } = setup({
+      ...signingRoutes(),
+      'POST /api/v1/signatures/cloud-sign/42': () =>
+        apiError(400, 'bad_request', 'Повторная подпись документа этим пользователем запрещена'),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerHttpError);
+    expect((error as SignerHttpError).upstreamMessage).toBe(
+      'cloud-sign: Повторная подпись документа этим пользователем запрещена [bad_request]',
+    );
+    expect((error as Error).message).toMatch(/earlier attempt.*stored.*uploads the file anew/);
+  });
+});
+
+describe('DocumentsCloudSigner login JWT lifetime', () => {
+  const auth = { login: 'admin', password: PASSWORD };
+
+  it.each([
+    [
+      'expiresAt (preferred over expiresInSeconds)',
+      (now: number) => ({
+        expiresAt: new Date(now + 300_000).toISOString(),
+        expiresInSeconds: 900,
+      }),
+      4 * 60_000,
+    ],
+    ['expiresInSeconds', () => ({ expiresInSeconds: 300 }), 4 * 60_000],
+    [
+      'expiresInSeconds when expiresAt is not a date',
+      () => ({ expiresAt: 'soon', expiresInSeconds: 300 }),
+      4 * 60_000,
+    ],
+    ['neither (15 min assumed)', () => ({}), 14 * 60_000],
+  ])('renews the JWT a minute before it expires by %s', async (_name, lifetime, renewAfterMs) => {
+    let now = Date.parse(NOW);
+    const { signer, calls } = setup(
+      {
+        ...loginRoutes(),
+        ...signingRoutes(),
+        'GET /api/v1/auth/jwt': () => json({ token: LOGIN_JWT, ...lifetime(now) }),
+      },
+      { auth, now: () => now },
+    );
+    const logins = () => calls.filter((c) => c.path === '/api/v1/login').length;
+    await signer.sign(data);
+    now = Date.parse(NOW) + renewAfterMs - 1;
+    await signer.sign(data);
+    expect(logins()).toBe(1);
+    now = Date.parse(NOW) + renewAfterMs;
+    await signer.sign(data);
+    expect(logins()).toBe(2);
+  });
+});
+
+describe('DocumentsCloudSigner size limits (D50)', () => {
+  const LIMIT = 52_428_800;
+  /** The verify body the verifier will send: `{"cms":"<b64 signature>","data":"<b64 data>"}`. */
+  const verifyBody = (dataBytes: number) =>
+    20 + 4 * Math.ceil(VERIFY_SIGNATURE_MARGIN_BYTES / 3) + 4 * Math.ceil(dataBytes / 3);
+  /** Largest data length whose verify body (with the signature margin) fits `limit`. */
+  const largestFitting = (limit: number) => {
+    let n = Math.floor(((limit - verifyBody(0)) * 3) / 4);
+    while (verifyBody(n + 1) <= limit) n++;
+    while (verifyBody(n) > limit) n--;
+    return n;
+  };
+  const limitedVerifier = (maxRequestBytes: number) => ({
+    verify: vi.fn<Signer['verify']>(),
+    maxRequestBytes,
+  });
+
+  it('keeps a margin for a signature well above the КриптоАРМ Server CMS (≈ 2.2 KB)', () => {
+    expect(VERIFY_SIGNATURE_MARGIN_BYTES).toBeGreaterThanOrEqual(4 * serverBer.length);
+  });
+
+  it('refuses data whose verify body would exceed the verifier limit before uploading anything', async () => {
+    const limit = verifyBody(1000);
+    const { signer, fetchMock } = setup(signingRoutes(), {
+      verifier: limitedVerifier(limit),
+    });
+    const error = await rejection(signer.sign(Buffer.alloc(largestFitting(limit) + 1)));
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toMatchObject({
+      operation: 'sign',
+      requestBytes: verifyBody(largestFitting(limit) + 1),
+      limitBytes: limit,
+      status: undefined,
+    });
+    const message = (error as Error).message;
+    expect(message).toMatch(/^sign: /);
+    expect(message).toContain('nothing uploaded to КриптоАРМ Документы');
+    expect(message).toContain('/cms/verify');
+    expect(message).toContain(String(limit));
+    expect(message).toContain(`files up to ${String(largestFitting(limit))} B fit`);
+    expect(message).not.toMatch(/not sent$/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('signs data whose verify body fits the verifier limit exactly', async () => {
+    const limit = verifyBody(999); // a multiple of 3 bytes: the Base64 is exact
+    const { signer, fetchMock } = setup(signingRoutes(), {
+      verifier: limitedVerifier(limit),
+    });
+    await signer.sign(Buffer.alloc(999, 1));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('allows about 39.3 MB with the default КриптоАРМ Server limit (measured: cloud-sign fits 39 319 329 B)', () => {
+    const fits = largestFitting(LIMIT);
+    expect(fits).toBeGreaterThan(39_290_000);
+    expect(fits).toBeLessThan(39_319_329);
+  });
+
+  it('agrees with ServerCmsSigner: what passes the check fits its verify body with a margin-sized signature', async () => {
+    const limit = verifyBody(1000) + 2; // not a multiple of 4: the Base64 rounding matters
+    const serverFetch = vi.fn<typeof fetch>(() =>
+      Promise.resolve(json({ isValidSign: true, signs: [] }, { status: 201 })),
+    );
+    const server = new ServerCmsSigner({
+      baseUrl: 'http://server.test:3037',
+      certificate: certDer,
+      maxRequestBytes: limit,
+      fetch: serverFetch,
+    });
+    const fits = Buffer.alloc(largestFitting(limit), 1);
+    const signature = Buffer.alloc(VERIFY_SIGNATURE_MARGIN_BYTES, 2);
+    await server.verify(fits, signature);
+    await expect(server.verify(Buffer.alloc(fits.length + 3, 1), signature)).rejects.toBeInstanceOf(
+      SignerPayloadTooLargeError,
+    );
+
+    const { signer, fetchMock } = setup(signingRoutes(), { verifier: server });
+    await signer.sign(fits);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await expect(signer.sign(Buffer.alloc(fits.length + 3, 1))).rejects.toBeInstanceOf(
+      SignerPayloadTooLargeError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects a verifier maxRequestBytes of %s', (limit) => {
+    expect(() => setup(signingRoutes(), { verifier: limitedVerifier(limit) })).toThrow(
+      SignerConfigError,
+    );
+  });
+
+  it('does not check the size when the verifier exposes no limit', async () => {
+    const { signer, fetchMock } = setup(signingRoutes());
+    await signer.sign(data);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('maps the Документы upload limit (413 "File too large", MAX_FILE_SIZE) to SignerPayloadTooLargeError', async () => {
+    const { signer, calls } = setup({
+      'POST /api/v1/documents/upload': () =>
+        apiError(413, 'bad_request', 'File too large', 'req-413'),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toMatchObject({
+      operation: 'sign',
+      status: 413,
+      requestBytes: data.length,
+      limitBytes: undefined,
+      upstreamMessage: 'upload: File too large [bad_request]',
+      requestId: 'req-413',
+    });
+    const message = (error as Error).message;
+    expect(message).toContain('КриптоАРМ Документы');
+    expect(message).toContain('MAX_FILE_SIZE');
+    expect(message).toContain('request id req-413');
+    expect(message).not.toContain('its limit is');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('maps the upload pre-check 413 with its limit in details', async () => {
+    const { signer } = setup({
+      'POST /api/v1/documents/upload': () =>
+        json(
+          {
+            error: {
+              code: 'bad_request',
+              message: 'Файл слишком большой. Максимальный размер: 50 МБ',
+              details: { maxFileSizeBytes: 52_428_800, contentLength: 60_000_000 },
+            },
+          },
+          { status: 413 },
+        ),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toMatchObject({ status: 413, limitBytes: 52_428_800 });
+    expect((error as Error).message).toContain('its limit is 52428800 B');
+  });
+
+  it('maps a relayed КриптоАРМ Server "request entity too large" of cloud-sign to SignerPayloadTooLargeError', async () => {
+    const { signer, calls } = setup({
+      ...signingRoutes(),
+      'POST /api/v1/signatures/cloud-sign/42': () =>
+        apiError(400, 'bad_request', 'Ошибка облачной подписи: request entity too large', 'req-cs'),
+    });
+    const error = await rejection(signer.sign(data));
+    expect(error).toBeInstanceOf(SignerPayloadTooLargeError);
+    expect(error).toMatchObject({
+      operation: 'sign',
+      status: 400,
+      requestBytes: data.length,
+      limitBytes: undefined,
+      requestId: 'req-cs',
+    });
+    const message = (error as Error).message;
+    expect(message).toContain('cloud-sign');
+    expect(message).toContain('JSON_LIMIT');
+    expect(message).toContain('uploaded document stays');
+    expect(calls.filter((c) => c.path === '/api/v1/signatures/cloud-sign/42')).toHaveLength(1);
   });
 });
