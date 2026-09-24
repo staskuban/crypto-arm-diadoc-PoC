@@ -188,6 +188,33 @@ describe('cli', () => {
     expect(err.join('')).toMatch(message);
   });
 
+  it('default signer factory refuses a bad certificate and plain http at start (F13)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cli-cert-'));
+    const cert = join(dir, 'signer.cer');
+    await writeFile(
+      cert,
+      '-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n',
+    );
+    const cases: [CliEnv, RegExp][] = [
+      [
+        { CRYPTOARM_SERVER_URL: 'http://127.0.0.1:3037', SIGNER_CERT_PATH: cert },
+        /^error \[SIGNER_CONFIG\] SIGNER_CERT_PATH .*signer\.cer/,
+      ],
+      [
+        { CRYPTOARM_SERVER_URL: 'http://cryptoarm.example.com', SIGNER_CERT_PATH: cert },
+        /^error \[SIGNER_CONFIG\] CRYPTOARM_SERVER_URL must use https/,
+      ],
+    ];
+    for (const [extra, message] of cases) {
+      const { deps, err, sent } = setup(undefined, { ...ENV, ...extra });
+      const rest: CliDeps = { ...deps };
+      delete rest.createSigner;
+      expect(await main(['send', '/data/f.xml'], rest)).toBe(EXIT.failed);
+      expect(err.join('')).toMatch(message);
+      expect(sent).toEqual([]);
+    }
+  });
+
   it('prints [DIADOC_CONFIG] when the Diadoc client cannot be set up', async () => {
     const { deps, err } = setup();
     deps.createDiadoc = () => Promise.reject(new Error('DIADOC_CLIENT_ID is not set'));

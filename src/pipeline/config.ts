@@ -18,7 +18,8 @@ export class PipelineConfigError extends Error {
 const MAX_MS = 2 ** 31 - 1;
 
 /**
- * `DIADOC_FROM_BOX_ID`, `DIADOC_TO_BOX_ID` (staging and prod ids differ); optional
+ * `DIADOC_FROM_BOX_ID`, `DIADOC_TO_BOX_ID` (staging and prod ids differ; the `changeme`
+ * placeholder is refused); optional
  * `PIPELINE_PRECHECK` (`true`|`false`), `PIPELINE_STATUS_TIMEOUT_MS` (0 = read status once),
  * `PIPELINE_STATUS_INITIAL_DELAY_MS`, `PIPELINE_STATUS_MAX_DELAY_MS`.
  */
@@ -55,9 +56,13 @@ export function loadPipelineConfig(env: PipelineEnv = process.env): PipelineConf
   return { fromBoxId, toBoxId, precheck: precheckText !== 'false', poll };
 }
 
+/** `.env.example` placeholder: fail here, not with an opaque 4xx from Диадок (D20). */
+const PLACEHOLDER = 'changeme';
+
 function required(env: PipelineEnv, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new PipelineConfigError(`${name} is not set`);
+  if (value === PLACEHOLDER) throw new PipelineConfigError(`${name} is still the placeholder`);
   return value;
 }
 
