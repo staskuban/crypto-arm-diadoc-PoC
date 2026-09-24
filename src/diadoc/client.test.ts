@@ -6,6 +6,7 @@ import {
   DiadocClient,
   type DiadocClientOptions,
   findDocumentEntity,
+  SHELF_UPLOAD_MAX_BYTES,
 } from './client.js';
 import { DiadocConflictError, DiadocError, DiadocOperationPendingError } from './errors.js';
 import type { Message, MessageToPost, SignedContent } from './types.js';
@@ -444,3 +445,59 @@ describe('DiadocClient errors and auth', () => {
 interface MessageToPostWire {
   DocumentAttachments: { SignedContent: Record<string, unknown> }[];
 }
+
+describe('DiadocClient.shelfUpload', () => {
+  const textResponse = (body: string, status = 200): Response =>
+    new Response(body, { status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+
+  it('POSTs raw bytes to V2/ShelfUpload and returns the generated name (plain text)', async () => {
+    const { client, calls } = makeClient([textResponse('dd-api-6831e2e9')]);
+    const content = Buffer.from([0xcf, 0xf0, 0xe8, 0x00]);
+
+    expect(await client.shelfUpload(content, { fileExtension: '.xml' })).toBe('dd-api-6831e2e9');
+
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(calls[0]?.url.pathname).toBe('/V2/ShelfUpload');
+    expect(calls[0]?.url.searchParams.get('fileExtension')).toBe('.xml');
+    expect(headerOf(calls[0], 'content-type')).toBe('application/octet-stream');
+    expect(Buffer.from(calls[0]?.init.body as Uint8Array)).toEqual(content);
+  });
+
+  it('accepts the name as a JSON string and omits fileExtension when not given', async () => {
+    const { client, calls } = makeClient([jsonResponse('dd-api-1')]);
+    expect(await client.shelfUpload(Buffer.from('x'))).toBe('dd-api-1');
+    expect(calls[0]?.url.search).toBe('');
+  });
+
+  it('rejects content above the single-request limit without a request', async () => {
+    const { client, calls } = makeClient([]);
+    await expect(client.shelfUpload(Buffer.alloc(SHELF_UPLOAD_MAX_BYTES + 1))).rejects.toThrow(
+      /ShelfUploadPart/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects empty content and an empty returned name', async () => {
+    const { client } = makeClient([textResponse('  ')]);
+    await expect(client.shelfUpload(Buffer.alloc(0))).rejects.toThrow(/empty/);
+    await expect(client.shelfUpload(Buffer.from('x'))).rejects.toBeInstanceOf(DiadocError);
+  });
+
+  it('maps a non-2xx answer to DiadocError', async () => {
+    const { client } = makeClient([textResponse('bad', 400)]);
+    await expect(client.shelfUpload(Buffer.from('x'))).rejects.toMatchObject({
+      status: 400,
+      path: '/V2/ShelfUpload',
+    });
+  });
+
+  it('resends the same bytes after a 401', async () => {
+    const auth = new FakeAuth('OLD', 'NEW');
+    const { client, calls } = makeClient([textResponse('', 401), textResponse('dd-api-2')], {
+      auth,
+    });
+    expect(await client.shelfUpload(Buffer.from('abc'))).toBe('dd-api-2');
+    expect(headerOf(calls[1], 'authorization')).toBe('Bearer NEW');
+    expect(Buffer.from(calls[1]?.init.body as Uint8Array).toString()).toBe('abc');
+  });
+});
