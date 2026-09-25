@@ -1,10 +1,10 @@
 // S1 spike CLI. Usage: node src/cli.ts <command> [options]; see README.md.
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, join, dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadEnv, requireVars } from './env.ts';
-import { chooseRefreshToken, refreshAccessToken } from './auth.ts';
+import { assertTokenFileUsable, chooseRefreshToken, readRefreshTokenFile, refreshAccessToken, writeRefreshTokenFile } from './auth.ts';
 import { DiadocClient } from './client.ts';
 import { buildMinimalUtd, readIdFile, type Party, type UtdParams } from './utd.ts';
 import { buildUtdAttachment, pickUtdType, readSignatureFile, UTD_TYPE } from './attachment.ts';
@@ -17,7 +17,8 @@ const FUNCTION = 'СЧФДОП';
 const VERSION = 'utd970_05_03_01';
 
 const env = loadEnv(join(ROOT, '.env'));
-const apiUrl = env.DIADOC_API_URL || 'https://diadoc-api-staging.kontur.ru';
+// the quickstart test boxes live on the production host (D191)
+const apiUrl = env.DIADOC_API_URL || 'https://diadoc-api.kontur.ru';
 const tokenUrl = env.DIADOC_TOKEN_URL || 'https://identity.kontur.ru/connect/token';
 
 function save(dir: string, name: string, data: unknown): string {
@@ -36,39 +37,60 @@ function load<T>(dir: string, name: string): T | undefined {
 type Tokens = { accessToken: string; refreshToken: string; sourceRefreshToken: string; expiresAt: number; tokenUrl: string; clientId: string };
 
 /**
- * Reuses a cached access token of the same IdP/client; otherwise refreshes with the rotated refresh token
- * from .state, unless DIADOC_REFRESH_TOKEN in .env was replaced since (see chooseRefreshToken).
+ * Reuses a cached access token of the same IdP/client. With DIADOC_REFRESH_TOKEN_FILE the refresh token is read
+ * from and rotated into that file (.state keeps only its hash); otherwise it refreshes with the rotated refresh
+ * token from .state, unless DIADOC_REFRESH_TOKEN in .env was replaced since (see chooseRefreshToken).
  */
 async function accessToken(force = false): Promise<string> {
-  const v = requireVars(env, ['DIADOC_CLIENT_ID', 'DIADOC_CLIENT_SECRET', 'DIADOC_REFRESH_TOKEN']);
+  // DIADOC_REFRESH_TOKEN_FILE (shared with the main CLI) wins: it is the only copy, rotations are written back to it
+  const tokenFile = env.DIADOC_REFRESH_TOKEN_FILE || undefined;
+  const v = requireVars(
+    tokenFile ? { ...env, DIADOC_REFRESH_TOKEN: readRefreshTokenFile(tokenFile) } : env,
+    ['DIADOC_CLIENT_ID', 'DIADOC_CLIENT_SECRET', 'DIADOC_REFRESH_TOKEN'],
+  );
   const stored = load<Tokens>(STATE, 'tokens.json');
   const cached = stored?.tokenUrl === tokenUrl && stored.clientId === v.DIADOC_CLIENT_ID ? stored : undefined;
-  if (!force && cached && cached.sourceRefreshToken === v.DIADOC_REFRESH_TOKEN && cached.expiresAt - Date.now() > 5 * 60_000) {
+  // with a token file only a hash of the refresh token is cached, never the token itself
+  const source = tokenFile ? `sha256:${createHash('sha256').update(v.DIADOC_REFRESH_TOKEN).digest('hex')}` : v.DIADOC_REFRESH_TOKEN;
+  if (!force && cached && cached.sourceRefreshToken === source && cached.expiresAt - Date.now() > 5 * 60_000) {
     return cached.accessToken;
   }
-  const refreshToken = chooseRefreshToken(v.DIADOC_REFRESH_TOKEN, cached);
+  const refreshToken = tokenFile ? v.DIADOC_REFRESH_TOKEN : chooseRefreshToken(v.DIADOC_REFRESH_TOKEN, cached);
+  if (tokenFile) assertTokenFileUsable(tokenFile);
   let t;
   try {
     t = await refreshAccessToken({ tokenUrl, clientId: v.DIADOC_CLIENT_ID, clientSecret: v.DIADOC_CLIENT_SECRET, refreshToken });
   } catch (e) {
-    if (/invalid_grant/.test((e as Error).message)) {
+    // identity.kontur.ru answers a bad refresh token with invalid_client too (D190)
+    if (/invalid_grant|invalid_client/.test((e as Error).message)) {
       console.error(
-        refreshToken === v.DIADOC_REFRESH_TOKEN
-          ? 'hint: the refresh token in .env is expired/revoked or was already rotated; issue a new one in the integrator cabinet'
+        tokenFile || refreshToken === v.DIADOC_REFRESH_TOKEN
+          ? `hint: the refresh token in ${tokenFile ?? '.env'} is expired/revoked or was already rotated (or, for invalid_client, DIADOC_CLIENT_ID/SECRET are wrong); issue a new one in the integrator cabinet`
           : 'hint: the rotated refresh token in .state/tokens.json is no longer valid; issue a new one in the integrator cabinet and put it into .env',
       );
     }
     throw e;
   }
+  const rotated = t.refreshToken !== refreshToken;
+  if (tokenFile && rotated) {
+    try {
+      writeRefreshTokenFile(tokenFile, t.refreshToken);
+    } catch (e) {
+      // the old token is already spent: keep the new one on disk rather than lose it
+      save(STATE, 'rotated-refresh-token.txt', Buffer.from(`${t.refreshToken}\n`));
+      throw new Error(`could not write ${tokenFile} (${(e as Error).message}); the rotated token is in .state/rotated-refresh-token.txt, move it there by hand`);
+    }
+  }
   save(STATE, 'tokens.json', {
     accessToken: t.accessToken,
-    refreshToken: t.refreshToken,
-    sourceRefreshToken: v.DIADOC_REFRESH_TOKEN,
+    // with a token file, .state keeps no second copy of the refresh token
+    refreshToken: tokenFile ? '' : t.refreshToken,
+    sourceRefreshToken: tokenFile ? `sha256:${createHash('sha256').update(t.refreshToken).digest('hex')}` : v.DIADOC_REFRESH_TOKEN,
     expiresAt: Date.now() + t.expiresIn * 1000,
     tokenUrl,
     clientId: v.DIADOC_CLIENT_ID,
   } satisfies Tokens);
-  console.log(`token: ok, expires_in=${t.expiresIn}s, refresh_token ${t.refreshToken !== refreshToken ? 'ROTATED (saved to .state/tokens.json)' : 'unchanged'}`);
+  console.log(`token: ok, expires_in=${t.expiresIn}s, refresh_token ${rotated ? `ROTATED (saved to ${tokenFile ?? '.state/tokens.json'})` : 'unchanged'}`);
   return t.accessToken;
 }
 
