@@ -1,0 +1,32 @@
+{
+  "SigningTime": {
+    "Ticks": 639259449244117098
+  },
+  "SignatureVerificationTime": {
+    "Ticks": 639259449247299477
+  },
+  "SignatureVerificationResult": {
+    "IsValid": true,
+    "CertificateStatus": {
+      "VerificationTimeTicks": 639259449246748094,
+      "IsValid": false,
+      "CertificateChain": [
+        {
+          "CertificateChainStatusFlags": 16842816
+        }
+      ],
+      "VerificationTime": {
+        "Ticks": 639259449246748094
+      }
+    }
+  },
+  "Thumbprint": "0E84B59E46E4648FC3DC808EB94D58F4DE673F1F",
+  "SerialNumber": "7C003B00DFEF3FBCA12EAFB41B0015003B00DF",
+  "Issuer": "Тестовый УЦ ООО \"КРИПТО-ПРО\"",
+  "StartDate": "10.09.26",
+  "EndDate": "28.10.26",
+  "JobTitle": "",
+  "FirstName": "",
+  "Surname": "",
+  "CertificateSubjectType": "UnknownCertificateSubjectType"
+}

@@ -29,6 +29,7 @@ import type {
   MessageValidationResult,
   Organization,
   OrganizationList,
+  SignatureInfo,
 } from './types.js';
 
 export const DIADOC_HOSTS = {
@@ -348,6 +349,20 @@ export class DiadocClient {
         entityId: ref.entityId,
         injectEntityContent: 'false',
       },
+      o,
+    );
+  }
+
+  /** V5/GetMessage without entity content: the entities (signatures, notifications) of a message. */
+  getMessage(boxId: string, messageId: string, o: RequestOptions = {}): Promise<Message> {
+    return this.getJson('/V5/GetMessage', { boxId, messageId, injectEntityContent: 'false' }, o);
+  }
+
+  /** How Diadoc verified a signature entity (`ref.entityId` is the Signature entity). */
+  getSignatureInfo(ref: DocumentRef, o: RequestOptions = {}): Promise<SignatureInfo> {
+    return this.getJson(
+      '/GetSignatureInfo',
+      { boxId: ref.boxId, messageId: ref.messageId, entityId: ref.entityId },
       o,
     );
   }

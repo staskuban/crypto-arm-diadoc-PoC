@@ -1,0 +1,167 @@
+{
+  "MessageId": "32e5d433-3418-479f-ac26-3c84773b942e",
+  "EntityId": "4523f2b9-f103-4a38-a30a-152709da8814",
+  "CreationTimestampTicks": 639259447904582316,
+  "CounteragentBoxId": "5321fa94c203493ca66e3a45f5dd6c8b@diadoc.ru",
+  "DocumentType": "UniversalTransferDocument",
+  "InitialDocumentIds": [],
+  "SubordinateDocumentIds": [],
+  "Content": {
+    "Size": 2107
+  },
+  "FileName": "ON_NSCHFDOPPR_2BM-9659998725-965901000-202609250235309299170_2BM-9620316755-962001000-202609250245017009189_20260925_692b171f-c3d6-4c88-8b56-90b058c6619b_0_0_0_0_0_00.xml",
+  "DocumentDate": "25.09.2026",
+  "DocumentNumber": "S1-GEN-1",
+  "IsDeleted": false,
+  "DepartmentId": "00000000-0000-0000-0000-000000000000",
+  "IsTest": true,
+  "FromDepartmentId": "00000000-0000-0000-0000-000000000000",
+  "ToDepartmentId": "00000000-0000-0000-0000-000000000000",
+  "CustomDocumentId": "8ab6e16c-0349-47e6-89ee-fe5fb91cc81f",
+  "RevocationStatus": "RevocationStatusNone",
+  "SendTimestampTicks": 639259447904582316,
+  "DeliveryTimestampTicks": 639259447907929366,
+  "ForwardDocumentEvents": [],
+  "RoamingNotificationStatus": "RoamingNotificationStatusNone",
+  "HasCustomPrintForm": false,
+  "CustomData": [],
+  "DocumentDirection": "Outbound",
+  "LastModificationTimestampTicks": 639259452306473143,
+  "IsEncryptedContent": false,
+  "SenderSignatureStatus": "SenderSignatureCheckedAndValid",
+  "IsRead": true,
+  "PacketIsLocked": false,
+  "UniversalTransferDocumentMetadata": {
+    "DocumentStatus": "OutboundWithRecipientSignature",
+    "Total": "122.00",
+    "Vat": "22.00",
+    "Grounds": "",
+    "DocumentFunction": "СЧФДОП",
+    "Currency": 643,
+    "ConfirmationDateTimeTicks": 639259555904582316,
+    "InvoiceAmendmentFlags": 0
+  },
+  "ProxySignatureStatus": "ProxySignatureStatusNone",
+  "TypeNamedId": "UniversalTransferDocument",
+  "Function": "СЧФДОП",
+  "WorkflowId": 18,
+  "Title": "УПД №S1-GEN-1 от 25.09.26",
+  "Metadata": [
+    {
+      "Key": "FileName",
+      "Value": "ON_NSCHFDOPPR_2BM-9659998725-965901000-202609250235309299170_2BM-9620316755-962001000-202609250245017009189_20260925_692b171f-c3d6-4c88-8b56-90b058c6619b_0_0_0_0_0_00.xml"
+    },
+    {
+      "Key": "DocumentNumber",
+      "Value": "S1-GEN-1"
+    },
+    {
+      "Key": "DocumentDate",
+      "Value": "25.09.2026"
+    },
+    {
+      "Key": "TotalSum",
+      "Value": "122.00"
+    },
+    {
+      "Key": "TotalVat",
+      "Value": "22.00"
+    },
+    {
+      "Key": "CurrencyCode",
+      "Value": "643"
+    },
+    {
+      "Key": "TotalVat10",
+      "Value": "0"
+    },
+    {
+      "Key": "TotalVat18",
+      "Value": "0"
+    },
+    {
+      "Key": "TotalVat20",
+      "Value": "0"
+    },
+    {
+      "Key": "SellerInn",
+      "Value": "9620316755"
+    }
+  ],
+  "RecipientReceiptMetadata": {
+    "ReceiptStatus": "Finished",
+    "ConfirmationMetadata": {
+      "ReceiptStatus": "GeneralReceiptStatusNotAcceptable",
+      "DateTimeTicks": 639259451089631927
+    }
+  },
+  "ConfirmationMetadata": {
+    "ReceiptStatus": "GeneralReceiptStatusNotAcceptable",
+    "DateTimeTicks": 639259447916980421
+  },
+  "RecipientResponseStatus": "WithRecipientSignature",
+  "AmendmentRequestMetadata": {
+    "AmendmentFlags": 0,
+    "ReceiptStatus": "GeneralReceiptStatusNotAcceptable"
+  },
+  "EditingSettingId": "",
+  "LockMode": "None",
+  "SenderReceiptMetadata": {
+    "ReceiptStatus": "GeneralReceiptStatusNotAcceptable"
+  },
+  "Version": "utd970_05_03_01",
+  "LastOuterDocflows": [],
+  "DocflowStatus": {
+    "PrimaryStatus": {
+      "Severity": "Success",
+      "StatusText": "Подписан контрагентом"
+    },
+    "PowerOfAttorneyGeneralStatus": {
+      "Severity": "Warning",
+      "StatusNamedId": "IsNotAttached",
+      "StatusText": "Не приложена доверенность",
+      "Errors": []
+    }
+  },
+  "TtGisFixationCancellationStatus": "TtGisFixationCancellationStatusNone",
+  "HasUnreadOutOfWorkflowUniversalMessages": false,
+  "Participants": [
+    {
+      "Participant": {
+        "BoxId": "e593899018eb40eebd7eb252e394aa15@diadoc.ru",
+        "DepartmentId": "00000000-0000-0000-0000-000000000000",
+        "Role": "default:sender",
+        "Flags": {
+          "IsRoaming": false,
+          "IsCrossborder": false,
+          "IsForeign": false
+        },
+        "Type": "Sender",
+        "IsCurrentBox": true
+      },
+      "RecipientResponseStatus": "RecipientResponseStatusUnknown"
+    },
+    {
+      "Participant": {
+        "BoxId": "5321fa94c203493ca66e3a45f5dd6c8b@diadoc.ru",
+        "DepartmentId": "00000000-0000-0000-0000-000000000000",
+        "Role": "default:recipient",
+        "Flags": {
+          "IsRoaming": false,
+          "IsCrossborder": false,
+          "IsForeign": false
+        },
+        "Type": "Recipient",
+        "IsCurrentBox": false
+      },
+      "RecipientResponseStatus": "WithRecipientSignature"
+    }
+  ],
+  "RecipientResponseAmendmentRequestMetadata": {
+    "AmendmentFlags": 0,
+    "ReceiptStatus": "GeneralReceiptStatusNotAcceptable"
+  },
+  "MessageIdGuid": "32e5d433-3418-479f-ac26-3c84773b942e",
+  "EntityIdGuid": "4523f2b9-f103-4a38-a30a-152709da8814",
+  "CreationTimestamp": "2026-09-25T14:53:10.4582316Z"
+}

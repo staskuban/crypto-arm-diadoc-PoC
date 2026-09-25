@@ -1,0 +1,40 @@
+{
+  "SigningTime": {
+    "Ticks": 639259447907929366
+  },
+  "SignatureVerificationTime": {
+    "Ticks": 639259447907929366
+  },
+  "SignatureVerificationResult": {
+    "IsValid": true,
+    "CertificateStatus": {
+      "VerificationTimeTicks": 639259447907281676,
+      "IsValid": true,
+      "CertificateChain": [
+        {
+          "CertificateChainStatusFlags": 0
+        },
+        {
+          "CertificateChainStatusFlags": 0
+        }
+      ],
+      "VerificationTime": {
+        "Ticks": 639259447907281676
+      }
+    },
+    "SignatureTimestamp": {
+      "Ticks": 639259447900000000
+    }
+  },
+  "Thumbprint": "3B75E86236664C455446531627CBBC885352180E",
+  "SerialNumber": "01172FA80099B3AD814CF358A2E2AD5127",
+  "Issuer": "УЦ EasyCert",
+  "StartDate": "18.11.25",
+  "EndDate": "18.02.27",
+  "OrgName": "Тестовая организация",
+  "OrgInn": "6663003127",
+  "JobTitle": "директор",
+  "FirstName": "Сертификат Тестовый",
+  "Surname": "Диадок",
+  "CertificateSubjectType": "LegalEntity"
+}

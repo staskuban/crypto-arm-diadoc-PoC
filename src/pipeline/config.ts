@@ -18,8 +18,8 @@ export class PipelineConfigError extends Error {
 const MAX_MS = 2 ** 31 - 1;
 
 /**
- * `DIADOC_FROM_BOX_ID`, `DIADOC_TO_BOX_ID` (staging and prod ids differ; the `changeme`
- * placeholder is refused); optional
+ * `DIADOC_FROM_BOX_ID`, `DIADOC_TO_BOX_ID` (ids of the boxes on the `DIADOC_API_URL` host: the
+ * quickstart test boxes live on prod, D191; the `changeme` placeholder is refused); optional
  * `PIPELINE_PRECHECK` (`true`|`false`), `PIPELINE_STATUS_TIMEOUT_MS` (0 = read status once),
  * `PIPELINE_STATUS_INITIAL_DELAY_MS`, `PIPELINE_STATUS_MAX_DELAY_MS`.
  */

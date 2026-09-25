@@ -1,0 +1,34 @@
+{
+  "SigningTime": {
+    "Ticks": 639259449699386247
+  },
+  "SignatureVerificationTime": {
+    "Ticks": 639259449702990324
+  },
+  "SignatureVerificationResult": {
+    "IsValid": true,
+    "CertificateStatus": {
+      "VerificationTimeTicks": 639259449702027741,
+      "IsValid": false,
+      "CertificateChain": [
+        {
+          "CertificateChainStatusFlags": 16777312
+        }
+      ],
+      "VerificationTime": {
+        "Ticks": 639259449702027741
+      }
+    }
+  },
+  "Thumbprint": "9FE820C07BFA7FFBC5FB9272F0F4936D69944037",
+  "SerialNumber": "7C003BF38C7B0AC46869DA7A9A0015003BF38C",
+  "Issuer": "Тестовый УЦ ООО \"КРИПТО-ПРО\"",
+  "StartDate": "24.09.26",
+  "EndDate": "28.10.26",
+  "OrgName": "ООО \"О2 ПЛАТФОРМА\"",
+  "OrgInn": "2311386400",
+  "JobTitle": "Генеральный директор",
+  "FirstName": "Тест Тестович",
+  "Surname": "Тестов",
+  "CertificateSubjectType": "LegalEntity"
+}

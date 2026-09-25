@@ -183,6 +183,37 @@ describe('DiadocClient requests', () => {
     expect(JSON.parse(calls[0]?.body ?? '')).toEqual(prototype);
   });
 
+  it('V5/GetMessage without entity content (D203)', async () => {
+    const message = { MessageId: 'm', Entities: [{ EntityType: 'Attachment', EntityId: 'e' }] };
+    const { client, calls } = makeClient([jsonResponse(message)]);
+    const deadline = Date.now() + 60_000;
+
+    expect(await client.getMessage('box', 'm', { deadline })).toEqual(message);
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.url.pathname).toBe('/V5/GetMessage');
+    expect(Object.fromEntries(calls[0]?.url.searchParams ?? [])).toEqual({
+      boxId: 'box',
+      messageId: 'm',
+      injectEntityContent: 'false',
+    });
+  });
+
+  it('GetSignatureInfo for a signature entity (D203)', async () => {
+    const info = { SignatureVerificationResult: { IsValid: true }, Thumbprint: 'AB' };
+    const { client, calls } = makeClient([jsonResponse(info)]);
+
+    expect(await client.getSignatureInfo({ boxId: 'box', messageId: 'm', entityId: 's' })).toEqual(
+      info,
+    );
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.url.pathname).toBe('/GetSignatureInfo');
+    expect(Object.fromEntries(calls[0]?.url.searchParams ?? [])).toEqual({
+      boxId: 'box',
+      messageId: 'm',
+      entityId: 's',
+    });
+  });
+
   it('V3/GetDocument without entity content; getDocflowStatus extracts DocflowStatus', async () => {
     const docflowStatus = { PrimaryStatus: { Severity: 'Success', StatusText: 'Подписан' } };
     const { client, calls } = makeClient([
