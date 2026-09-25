@@ -52,3 +52,37 @@ test('chooseRefreshToken prefers the rotated token unless .env was changed since
   assert.equal(chooseRefreshToken('ENV1', { refreshToken: 'ROT', sourceRefreshToken: 'ENV1' }), 'ROT');
   assert.equal(chooseRefreshToken('ENV2', { refreshToken: 'ROT', sourceRefreshToken: 'ENV1' }), 'ENV2');
 });
+
+test('refresh token file: read trims, write replaces atomically with mode 0600', async () => {
+  const { readRefreshTokenFile, writeRefreshTokenFile } = await import('../src/auth.ts');
+  const { mkdtempSync, writeFileSync, statSync, readFileSync, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'rt-'));
+  const file = join(dir, 'token');
+  writeFileSync(file, 'RT1\n', { mode: 0o600 });
+  assert.equal(readRefreshTokenFile(file), 'RT1');
+  writeRefreshTokenFile(file, 'RT2');
+  assert.equal(readFileSync(file, 'utf8'), 'RT2\n');
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(existsSync(`${file}.tmp`), false);
+  writeFileSync(file, '\n');
+  assert.throws(() => readRefreshTokenFile(file), /empty/);
+});
+
+test('assertTokenFileUsable refuses a left-over .tmp and a lock held by the main CLI', async () => {
+  const { assertTokenFileUsable } = await import('../src/auth.ts');
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'rt-'));
+  const file = join(dir, 'token');
+  writeFileSync(file, 'RT1\n', { mode: 0o600 });
+  assert.doesNotThrow(() => assertTokenFileUsable(file));
+  writeFileSync(`${file}.tmp`, 'RT0\n');
+  assert.throws(() => assertTokenFileUsable(file), /\.tmp/);
+  rmSync(`${file}.tmp`);
+  writeFileSync(`${file}.lock`, 'pid');
+  assert.throws(() => assertTokenFileUsable(file), /\.lock/);
+  rmSync(dir, { recursive: true });
+});

@@ -1,6 +1,6 @@
-# S1 spike: Контур.Диадок staging
+# S1 spike: Контур.Диадок test boxes
 
-Throwaway scripts that answer the S1 questions from `docs/plan.md`: refresh-token auth on the staging platform, `GetMyOrganizations`, `GetDocumentTypes (V3)`, `CanPostMessage` + `PostMessage (V3)` of a УПД `utd970_05_03_01` `СЧФДОП` (test signature or a detached CMS file), `GetDocument (V3)` → `DocflowStatus`. Findings live in `docs/research.md`. This is not production code: T3/T4 re-implement it properly.
+Throwaway scripts that answer the S1 questions from `docs/plan.md`: refresh-token auth, test boxes (on the production host, D191), `GetMyOrganizations`, `GetDocumentTypes (V3)`, `CanPostMessage` + `PostMessage (V3)` of a УПД `utd970_05_03_01` `СЧФДОП` (test signature or a detached CMS file), `GetDocument (V3)` → `DocflowStatus`. Findings live in `docs/research.md` ("S1 spike findings", "S1 live run" of 2026-09-25). This is not production code: T3/T4 re-implement it properly.
 
 Node ≥ 22.18 runs the `.ts` files directly (type stripping), no build step and no runtime dependencies.
 
@@ -23,14 +23,16 @@ cp .env.example .env   # then fill in, see "Human inputs"
 | `node src/cli.ts post --xml <file> --signature <cms>` | same, but sends the given bytes with a detached CMS (DER, base64 or PEM). `--signature` without `--xml` is refused: the CMS covers one specific file | same |
 | `node src/cli.ts post --resume` | re-sends an unfinished PostMessage with the same `operationId` and body from `.state/pending-post.json`, so no duplicate is created | same |
 | `node src/cli.ts status [--message-id --entity-id]` | `GET /V3/GetDocument?injectEntityContent=false`, prints `DocflowStatus` (defaults to the last post) | `out/document.json` |
-| `node src/cli.ts generate --user-data <xml>` | `POST /GenerateTitleXml` (UserContract XML, XSD in `xsd/`) | `out/<file from Content-Disposition>` |
+| `node src/cli.ts generate --user-data <xml>` | `POST /GenerateTitleXml` (UserContract XML, XSD in `xsd/`; live-tested sample `fixtures/user-data-s1.xml` — the test boxes have no address, so parties go as `OrganizationDetails OrgType="2"` with an explicit `RussianAddress`, D201) | `out/<file from Content-Disposition>` |
 | `node src/cli.ts all --test-signature` | token → orgs → types → post → status | |
 
-`.env`, `.state/` and `out/` are git-ignored. `.state/tokens.json` (mode 0600) holds the access token and the latest refresh token. Put a newly issued refresh token into `.env` and it wins over the cached one. If the token endpoint rotated the token, deleting `.state/` loses the only valid copy, and a new token must be issued in the cabinet.
+`.env`, `.state/` and `out/` are git-ignored. With `DIADOC_REFRESH_TOKEN_FILE` (preferred, shared with the main CLI) the refresh token lives only in that file: a rotated token is written back to it and `.state/tokens.json` (0600) keeps the access token plus a hash. Without it `.state/tokens.json` holds the latest refresh token too; a newly issued token in `.env` wins over the cached one, and if the token endpoint rotated it, deleting `.state/` loses the only valid copy. (Live 2026-09-25: the IdP did not rotate it.)
 
-Unverified assumptions (check on the first live run): message bodies send box ids exactly as configured (`<hex>@diadoc.ru`, as in the Diadoc samples), while query strings use the GUID derived by `toBoxGuid`. Compare that with `BoxIdGuid` in `out/my-organizations.json`. A missing `Address.RussianAddress.Region` falls back to region 77.
+Live-checked 2026-09-25: GUID box ids work in message bodies and query strings (answers echo `<hex>@diadoc.ru`); `CanPostMessage` needs a GUID `CustomDocumentId` (D200, D192). The test organisations have an empty `Address.RussianAddress.Region`, so the builder falls back to region 77.
 
 ## Test-CA signature run (after I1)
+
+Result of the 2026-09-25 run: Диадок does not trust the КриптоПро test CA — «Ошибка в подписи», not delivered (D202). The main CLI does the same run in one step: `npm run cli -- send <file> --no-precheck` (from the repo root, `SIGNER_KIND=server`).
 
 The signature must cover the exact bytes that are sent:
 

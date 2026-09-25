@@ -1,3 +1,5 @@
+import { accessSync, closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import { dirname } from 'node:path';
 // OIDC Refresh Token Flow against identity.kontur.ru (developer.kontur.ru/doc/diadoc-api/authentication.html).
 // The staging/prod choice is not a token parameter: the scope (Diadoc.PublicAPI.Staging) is fixed when
 // the refresh token is issued in the integrator cabinet.
@@ -44,4 +46,41 @@ export async function refreshAccessToken(o: {
  */
 export function chooseRefreshToken(envToken: string, cached?: { refreshToken: string; sourceRefreshToken: string }): string {
   return cached && cached.sourceRefreshToken === envToken ? cached.refreshToken : envToken;
+}
+
+/** DIADOC_REFRESH_TOKEN_FILE: the single copy of the refresh token shared with the main CLI. */
+export function readRefreshTokenFile(file: string): string {
+  const token = readFileSync(file, 'utf8').trim();
+  if (!token) throw new Error(`Refresh token file ${file} is empty`);
+  return token;
+}
+
+/**
+ * Checked before a refresh, so a rotated token never ends up only in memory: a <file>.lock means the main CLI
+ * is using the token (one process per refresh token), a <file>.tmp may hold a newer token, and the directory
+ * must be writable for the <file>.tmp + rename below.
+ */
+export function assertTokenFileUsable(file: string): void {
+  if (existsSync(`${file}.lock`)) throw new Error(`${file}.lock exists: another process (the main CLI?) is using this refresh token`);
+  if (existsSync(`${file}.tmp`)) throw new Error(`${file}.tmp exists and may hold a newer refresh token: check it and remove it by hand`);
+  accessSync(dirname(file), constants.W_OK);
+}
+
+/** Replaces the token file via <file>.tmp (0600, fsync) + rename + dir fsync, as the main CLI does. */
+export function writeRefreshTokenFile(file: string, token: string): void {
+  const tmp = `${file}.tmp`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    writeSync(fd, `${token}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+  const dir = openSync(dirname(file), 'r');
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
+  }
 }
