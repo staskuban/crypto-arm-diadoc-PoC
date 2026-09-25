@@ -21,6 +21,7 @@ import {
   type PostMessageOptions,
   type RequestOptions,
   type ShelfUploadOptions,
+  type SignatureInfo,
 } from '../diadoc/index.js';
 import {
   SignerNetworkError,
@@ -32,6 +33,7 @@ import {
 import { derChildren, parseCmsSignedData, readDer } from '../asn1/index.js';
 import { UtdError } from '../utd/index.js';
 import { PipelineError } from './errors.js';
+import { customDocumentIdFor } from './custom-document-id.js';
 import { operationIdFor, type OperationKey } from './operation-id.js';
 import { sendUtd, type PipelineDiadoc, type SendUtdInput, type SendUtdOptions } from './send.js';
 
@@ -55,6 +57,10 @@ const OTHER_CERT = readFileSync(
 );
 /** Inside the signer certificate's validity (2026-09-10 .. 2026-10-28). */
 const NOW = Date.parse('2026-10-01T00:00:00Z');
+
+const GUID = '6f9619ff-8b86-d011-b42d-00cf4fc964ff';
+const fixture = (name: string): unknown =>
+  JSON.parse(readFileSync(new URL(`./fixtures/diadoc-s1/${name}.json`, import.meta.url), 'utf8'));
 
 const FROM = 'from-box';
 const TO = 'to-box';
@@ -120,6 +126,9 @@ class FakeDiadoc implements PipelineDiadoc {
   onCanPostMessage: (() => Promise<MessageValidationResult>) | undefined;
   onGetDocument: (() => Promise<Document>) | undefined;
   onShelfUpload: (() => Promise<string>) | undefined;
+  lookups: unknown[][] = [];
+  message: Message | Error = new Error('GetMessage not expected');
+  signatureInfo: SignatureInfo | Error = new Error('GetSignatureInfo not expected');
 
   canPostResult: MessageValidationResult | Error = { Errors: [] };
   shelfResult: string | Error = 'dd-api-shelf';
@@ -155,6 +164,18 @@ class FakeDiadoc implements PipelineDiadoc {
     if (this.onGetDocument) return this.onGetDocument();
     const next = this.documents.length > 1 ? this.documents.shift() : this.documents[0];
     return settle(next ?? new Error('no document'));
+  }
+
+  getMessage(boxId: string, messageId: string, options?: RequestOptions): Promise<Message> {
+    this.calls.push('getMessage');
+    this.lookups.push([boxId, messageId, options]);
+    return settle(this.message);
+  }
+
+  getSignatureInfo(ref: DocumentRef, options?: RequestOptions): Promise<SignatureInfo> {
+    this.calls.push('getSignatureInfo');
+    this.lookups.push([ref, options]);
+    return settle(this.signatureInfo);
   }
 }
 
@@ -220,6 +241,8 @@ describe('sendUtd happy path', () => {
           TypeNamedId: 'UniversalTransferDocument',
           Function: 'СЧФДОП',
           Version: 'utd970_05_03_01',
+          // D200: CanPostMessage requires a GUID CustomDocumentId.
+          CustomDocumentId: customDocumentIdFor(opId()),
         },
       ],
     });
@@ -235,6 +258,7 @@ describe('sendUtd happy path', () => {
           Function: 'СЧФДОП',
           Version: 'utd970_05_03_01',
           SignedContent: { Content: CONTENT, Signature: DER_SIGNATURE },
+          CustomDocumentId: customDocumentIdFor(opId()),
         },
       ],
     });
@@ -243,6 +267,7 @@ describe('sendUtd happy path', () => {
 
     expect(result).toEqual({
       operationId: post?.options.operationId,
+      customDocumentId: customDocumentIdFor(opId()),
       fileName: FILE_NAME,
       fromBoxId: FROM,
       toBoxId: TO,
@@ -258,10 +283,42 @@ describe('sendUtd happy path', () => {
   });
 
   it('skips CanPostMessage when precheck is off and passes customDocumentId through', async () => {
-    const { diadoc, run } = setup({ precheck: false, customDocumentId: 'inv-42' });
-    await run();
+    const { diadoc, run } = setup({ precheck: false, customDocumentId: GUID });
+    const result = await run();
     expect(diadoc.calls).not.toContain('canPostMessage');
-    expect(diadoc.posts[0]?.message.DocumentAttachments[0]?.CustomDocumentId).toBe('inv-42');
+    expect(diadoc.posts[0]?.message.DocumentAttachments[0]?.CustomDocumentId).toBe(GUID);
+    expect(result.customDocumentId).toBe(GUID);
+  });
+
+  it('sends a given customDocumentId in the CanPostMessage prototype too', async () => {
+    const { diadoc, run } = setup({ customDocumentId: GUID });
+    await run();
+    expect(diadoc.prototypes[0]?.DocumentPrototypes[0]?.CustomDocumentId).toBe(GUID);
+  });
+
+  it('derives the same CustomDocumentId on a retry and a new one on a resend (D200)', async () => {
+    const first = setup();
+    const again = setup();
+    const resent = setup({ resend: 'r1' });
+    await first.run();
+    await again.run();
+    await resent.run();
+    const idOf = (d: typeof first.diadoc) =>
+      d.posts[0]?.message.DocumentAttachments[0]?.CustomDocumentId;
+    expect(idOf(first.diadoc)).toBe(idOf(again.diadoc));
+    expect(idOf(resent.diadoc)).toBe(customDocumentIdFor(opId({ resend: 'r1' })));
+    expect(idOf(resent.diadoc)).not.toBe(idOf(first.diadoc));
+  });
+
+  it.each([
+    ['a free-form id', 'inv-42'],
+    ['an empty string', ''],
+    ['a GUID in braces', `{${GUID}}`],
+  ])('refuses %s as customDocumentId before signing (D192)', async (_name, customDocumentId) => {
+    const { signer, diadoc, run } = setup({ customDocumentId });
+    await expect(run()).rejects.toThrow(/customDocumentId .* must be a GUID/);
+    expect(signer.signed).toEqual([]);
+    expect(diadoc.calls).toEqual([]);
   });
 
   it('returns CanPostMessage warnings without failing', async () => {
@@ -339,9 +396,9 @@ describe('sendUtd operationId', () => {
   });
 
   it('includes customDocumentId', async () => {
-    const { diadoc, run } = setup({ customDocumentId: 'inv-42' });
+    const { diadoc, run } = setup({ customDocumentId: GUID });
     const result = await run();
-    expect(diadoc.posts[0]?.options.operationId).toBe(opId({ customDocumentId: 'inv-42' }));
+    expect(diadoc.posts[0]?.options.operationId).toBe(opId({ customDocumentId: GUID }));
     expect(result.operationId).not.toBe(opId());
   });
 
@@ -724,6 +781,97 @@ describe('sendUtd PostMessage failures', () => {
     diadoc.postResult = { MessageId: 'msg-2', Entities: [] };
     const error = await failure(run());
     expect(error).toMatchObject({ code: 'NO_DOCUMENT_ENTITY', step: 'post', messageId: 'msg-2' });
+  });
+});
+
+describe('sendUtd sender signature check (D203)', () => {
+  // The live S1 doc2 answers: math valid, certificate not trusted, DeliveryFailureNotification.
+  const liveMessage = fixture('doc2-message') as Message;
+  const liveDocument = fixture('doc2-document') as Document;
+  const posted: Message = {
+    MessageId: liveMessage.MessageId,
+    Entities: (liveMessage.Entities ?? []).filter(
+      (e) =>
+        e.AttachmentType !== 'DeliveryFailureNotification' &&
+        e.AttachmentType !== 'SignatureVerificationReport',
+    ),
+  };
+
+  function rejected(options: Partial<SendUtdOptions> = {}) {
+    const s = setup(options);
+    s.diadoc.postResult = posted;
+    s.diadoc.documents = [liveDocument];
+    s.diadoc.message = liveMessage;
+    s.diadoc.signatureInfo = fixture('doc2-signatureinfo') as SignatureInfo;
+    return s;
+  }
+
+  it('on «Ошибка в подписи» reads the message and the signature and reports why', async () => {
+    const { diadoc, logs, run } = rejected();
+    const result = await run();
+
+    expect(diadoc.calls).toEqual([
+      'canPostMessage',
+      'postMessage',
+      'getDocument',
+      'getMessage',
+      'getSignatureInfo',
+    ]);
+    expect(diadoc.lookups[1]?.[0]).toEqual({
+      boxId: FROM,
+      messageId: liveMessage.MessageId,
+      entityId: '763850b8-f00d-4938-b46b-ba2e8a9e5f89',
+    });
+    expect(result).toMatchObject({
+      outcome: 'error',
+      signatureCheck: {
+        senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
+        reason: 'certificate',
+        mathValid: true,
+        certificateValid: false,
+        delivered: false,
+      },
+    });
+    expect(logs.join('\n')).toMatch(/\[SENDER_CERTIFICATE_REJECTED\]/);
+  });
+
+  it('checks an invalid sender signature even while the status is not an error yet', async () => {
+    const { diadoc, run } = rejected();
+    diadoc.documents = [
+      {
+        ...liveDocument,
+        DocflowStatus: status('Warning', 'Ожидается подпись контрагента'),
+      },
+    ];
+    const result = await run();
+    expect(result.outcome).toBe('pending');
+    expect(result.signatureCheck?.reason).toBe('certificate');
+  });
+
+  it('a failed lookup does not fail the posted send', async () => {
+    const { diadoc, run } = rejected();
+    diadoc.message = new DiadocError('GET', '/V5/GetMessage', 503, 'busy');
+    const result = await run();
+    expect(result).toMatchObject({ outcome: 'error', messageId: liveMessage.MessageId });
+    expect(result.signatureCheck).toMatchObject({ reason: 'unknown' });
+    expect(result.signatureCheck?.lookupErrors[0]).toMatch(/^GetMessage: /);
+    expect(diadoc.calls).not.toContain('getSignatureInfo');
+  });
+
+  it('gives the lookups their own deadline and the abort signal', async () => {
+    const controller = new AbortController();
+    const { diadoc, run } = rejected({ signal: controller.signal });
+    await run();
+    // Past the poll deadline (NOW + 10 s), and room for a token refresh (IdP timeout 30 s).
+    expect(diadoc.lookups[0]?.[2]).toEqual({ deadline: NOW + 90_000, signal: controller.signal });
+    expect(diadoc.lookups[1]?.[1]).toEqual({ deadline: NOW + 90_000, signal: controller.signal });
+  });
+
+  it('does not look anything up for a success or a valid signature', async () => {
+    const { diadoc, run } = setup();
+    const result = await run();
+    expect(diadoc.calls).not.toContain('getMessage');
+    expect(result.signatureCheck).toBeUndefined();
   });
 });
 

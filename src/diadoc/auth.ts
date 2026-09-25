@@ -266,7 +266,14 @@ function hintFor(oauthError: string | undefined): string {
         'a left-over <file>.tmp next to the token file may hold a newer token'
       );
     case 'invalid_client':
-      return '; check DIADOC_CLIENT_ID and DIADOC_CLIENT_SECRET (the API key of the integrator cabinet)';
+      // identity.kontur.ru also answers a bad refresh token with invalid_client, not invalid_grant
+      // (D190, live).
+      return (
+        '; check DIADOC_CLIENT_ID and DIADOC_CLIENT_SECRET (the API key of the integrator cabinet); ' +
+        'the IdP answers the same when the refresh token is invalid, expired or revoked: then issue ' +
+        'a new one in the integrator cabinet and put it into DIADOC_REFRESH_TOKEN_FILE (or ' +
+        'DIADOC_REFRESH_TOKEN)'
+      );
     default:
       return '';
   }

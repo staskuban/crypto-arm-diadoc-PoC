@@ -15,6 +15,7 @@ import {
 import { ServerCmsSigner } from '../signer/index.js';
 import { INLINE_CONTENT_LIMIT } from '../utd/index.js';
 import { PipelineError } from './errors.js';
+import { customDocumentIdFor } from './custom-document-id.js';
 import { operationIdFor } from './operation-id.js';
 import { sendUtd, type SendUtdResult } from './send.js';
 
@@ -228,6 +229,7 @@ function setup(): Setup {
 }
 
 interface WireAttachment {
+  CustomDocumentId?: string;
   TypeNamedId: string;
   Function: string;
   Version: string;
@@ -338,9 +340,12 @@ describe('sendUtd over the real clients (seam)', () => {
           TypeNamedId: 'UniversalTransferDocument',
           Function: 'СЧФДОП',
           Version: 'utd970_05_03_01',
+          // D200: a GUID derived from the operationId.
+          CustomDocumentId: customDocumentIdFor(GOLDEN_OPERATION_ID),
         },
       ],
     });
+    expect(result.customDocumentId).toBe(customDocumentIdFor(GOLDEN_OPERATION_ID));
 
     // Diadoc: one token for every call, the operationId on PostMessage.
     for (const r of net.requests.filter((q) => q.url.origin === DIADOC_URL)) {
@@ -354,6 +359,7 @@ describe('sendUtd over the real clients (seam)', () => {
       TypeNamedId: 'UniversalTransferDocument',
       Function: 'СЧФДОП',
       Version: 'utd970_05_03_01',
+      CustomDocumentId: result.customDocumentId,
     });
     expect(attachment.SignedContent.NameOnShelf).toBeUndefined();
     expect(b64(attachment.SignedContent.Content).equals(CONTENT)).toBe(true);
@@ -366,6 +372,52 @@ describe('sendUtd over the real clients (seam)', () => {
       boxId: FROM,
       messageId: 'msg-1',
       entityId: 'doc-1',
+    });
+  });
+
+  it('on «Ошибка в подписи» reads GetMessage and GetSignatureInfo (live S1 shapes, D203)', async () => {
+    const live = (name: string): unknown =>
+      JSON.parse(
+        readFileSync(new URL(`./fixtures/diadoc-s1/${name}.json`, import.meta.url), 'utf8'),
+      );
+    const { net, send } = setup();
+    net.on(`${DIADOC_URL}/V3/GetDocument`, () => json(live('doc2-document')));
+    net.on(`${DIADOC_URL}/V5/GetMessage`, () => json(live('doc2-message')));
+    net.on(`${DIADOC_URL}/GetSignatureInfo`, () => json(live('doc2-signatureinfo')));
+    // PostMessage answers with the document and its signature (the ids of the live message).
+    const message = live('doc2-message') as Message;
+    net.on(`${DIADOC_URL}/V3/PostMessage`, () =>
+      json({
+        MessageId: message.MessageId,
+        Entities: message.Entities?.filter(
+          (e) => e.EntityType === 'Signature' || e.AttachmentType === 'UniversalTransferDocument',
+        ),
+      }),
+    );
+
+    const result = await send(CONTENT);
+
+    expect(net.requests.map((r) => r.url.pathname).slice(-3)).toEqual([
+      '/V3/GetDocument',
+      '/V5/GetMessage',
+      '/GetSignatureInfo',
+    ]);
+    const [info] = net.to('/GetSignatureInfo');
+    // The live message's own signature entity under the document it names.
+    expect(Object.fromEntries(info?.url.searchParams ?? [])).toEqual({
+      boxId: FROM,
+      messageId: '3d6e7a22-4987-4866-a534-9fa94099178b',
+      entityId: '763850b8-f00d-4938-b46b-ba2e8a9e5f89',
+    });
+    expect(result).toMatchObject({
+      outcome: 'error',
+      signatureCheck: {
+        reason: 'certificate',
+        mathValid: true,
+        certificateValid: false,
+        chainProblems: ['REVOCATION_STATUS_UNKNOWN', 'PARTIAL_CHAIN', 'OFFLINE_REVOCATION'],
+        delivered: false,
+      },
     });
   });
 

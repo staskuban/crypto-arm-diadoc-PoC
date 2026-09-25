@@ -123,6 +123,18 @@ export interface Entity {
   EntityId?: string;
   ParentEntityId?: string;
   AttachmentType?: string;
+  /** Base64 `Data` is present for small entities even without `injectEntityContent` (live, S1). */
+  Content?: { Size?: number; Data?: string; [key: string]: unknown };
+  /** On a `DeliveryFailureNotification`: the MessageId that was not delivered. */
+  NotDeliveredEventId?: string;
+  /** On a `Signature`: `<hex>@diadoc.ru` of the signer's box. */
+  SignerBoxId?: string;
+  /** On a `Signature`: e.g. `PowerOfAttorneyRequired` for a certificate of another organisation. */
+  PowerOfAttorneyAttachmentStatus?: {
+    StatusName?: string;
+    Comment?: string;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 
@@ -145,6 +157,8 @@ export interface StatusModel {
 export interface DocflowStatus {
   PrimaryStatus?: StatusModel;
   SecondaryStatus?: StatusModel;
+  /** Warning «Не приложена доверенность» when no МЧД is attached (D204). */
+  PowerOfAttorneyGeneralStatus?: StatusModel;
   [key: string]: unknown;
 }
 
@@ -152,6 +166,39 @@ export interface Document {
   MessageId?: string;
   EntityId?: string;
   DocflowStatus?: DocflowStatus;
+  /** E.g. `SenderSignatureCheckedAndValid`, `SenderSignatureCheckedAndInvalid` (live, S1). */
+  SenderSignatureStatus?: string;
+  [key: string]: unknown;
+}
+
+export interface CertificateChainElement {
+  /** CryptoAPI `CERT_TRUST_*` error flags of this element. */
+  CertificateChainStatusFlags?: number;
+  DerCertificate?: string;
+  [key: string]: unknown;
+}
+
+/** GetSignatureInfo (shapes from the S1 live run). */
+export interface SignatureInfo {
+  SignatureVerificationResult?: {
+    /** The signature math over the content. */
+    IsValid?: boolean;
+    CertificateStatus?: {
+      /** Chain, validity and revocation as Diadoc sees them. */
+      IsValid?: boolean;
+      CertificateChain?: CertificateChainElement[];
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  Thumbprint?: string;
+  SerialNumber?: string;
+  Issuer?: string;
+  StartDate?: string;
+  EndDate?: string;
+  OrgName?: string;
+  OrgInn?: string;
+  CertificateSubjectType?: string;
   [key: string]: unknown;
 }
 

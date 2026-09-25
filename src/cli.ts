@@ -19,7 +19,9 @@ import {
   writeRefreshTokenFile,
 } from './diadoc/index.js';
 import {
+  describeSignatureCheck,
   isResendSalt,
+  isSignatureRejected,
   loadPipelineConfig,
   PipelineError,
   sendUtd,
@@ -36,7 +38,10 @@ export const EXIT = {
   /** Nothing was posted, or the post failed or is still pending (see the `[CODE]` on stderr). */
   failed: 1,
   usage: 2,
-  /** Posted, but Diadoc reports an error status (e.g. the signature was rejected). */
+  /**
+   * Posted, but Diadoc reports an error status or rejected the sender signature (why: the
+   * `docflow error [CODE]` line on stderr and `signatureCheck` in the JSON, D203).
+   */
   docflowError: 3,
   /** Posted (messageId on stderr), but the response had no document entity to track. */
   postedUntracked: 4,
@@ -85,8 +90,8 @@ The file name must be ИдФайл + ".xml"; the bytes are signed and sent uncha
 Sending the same file again reuses its operationId (Diadoc treats it as the same send).
 --resend posts it once more on purpose under a new operationId (random salt, printed on stderr);
 --resend=<salt> (1-128 of [A-Za-z0-9._:-]) repeats that resend idempotently.
-Prints the result as JSON. Exit codes: 0 posted, 1 failed, 2 usage, 3 posted but docflow error,
-4 posted but not trackable. Run one process at a time per refresh token.
+Prints the result as JSON. Exit codes: 0 posted, 1 failed, 2 usage, 3 posted but docflow error
+or sender signature rejected (reason on stderr), 4 posted but not trackable. Run one process at a time per refresh token.
 Everything after -- is the file name (for a name that starts with -).
 The first Ctrl+C/SIGTERM stops after the current step (a running PostMessage ends within its time
 budget); a second one exits at once (130/143), printing the operationId known so far.
@@ -182,7 +187,9 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
       },
     );
     deps.stdout(`${JSON.stringify(printable(result), null, 2)}\n`);
-    return result.outcome === 'error' ? EXIT.docflowError : EXIT.ok;
+    if (!isDocflowFailure(result)) return EXIT.ok;
+    deps.stderr(`${describeDocflowFailure(result)}\n`);
+    return EXIT.docflowError;
   } catch (error) {
     const interrupted = deps.signal?.aborted === true && error === deps.signal.reason;
     deps.stderr(
@@ -205,6 +212,8 @@ function tracked(diadoc: PipelineDiadoc, state: RunState): PipelineDiadoc {
     canPostMessage: (prototype, o) => diadoc.canPostMessage(prototype, o),
     shelfUpload: (content, o) => diadoc.shelfUpload(content, o),
     getDocument: (ref, o) => diadoc.getDocument(ref, o),
+    getMessage: (boxId, messageId, o) => diadoc.getMessage(boxId, messageId, o),
+    getSignatureInfo: (ref, o) => diadoc.getSignatureInfo(ref, o),
     postMessage: async (message, o) => {
       state.operationId = o.operationId;
       const posted = await diadoc.postMessage(message, o);
@@ -353,6 +362,21 @@ function printable(result: SendUtdResult): unknown {
       ? `${statusError.name}: ${statusError.message}`
       : JSON.stringify(statusError);
   return { ...rest, statusError: text };
+}
+
+/** An error status, or a sender signature Diadoc rejected while the status is not final yet. */
+function isDocflowFailure(result: SendUtdResult): boolean {
+  const check = result.signatureCheck;
+  return result.outcome === 'error' || (check !== undefined && isSignatureRejected(check));
+}
+
+function describeDocflowFailure(result: SendUtdResult): string {
+  const statusText = result.status?.PrimaryStatus?.StatusText;
+  const why =
+    result.signatureCheck === undefined
+      ? `[DOCFLOW_ERROR] ${statusText ?? result.outcome}`
+      : describeSignatureCheck(result.signatureCheck, statusText);
+  return `docflow error ${why} (operationId ${result.operationId}, messageId ${result.messageId})`;
 }
 
 function describeFailure(error: unknown): string {

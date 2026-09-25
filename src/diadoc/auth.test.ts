@@ -337,6 +337,9 @@ describe('RefreshTokenAuth', () => {
     });
     const err = await auth.getAccessToken().catch((e: unknown) => e);
     expect(String(err)).toMatch(/check DIADOC_CLIENT_ID and DIADOC_CLIENT_SECRET/);
+    // D190: identity.kontur.ru answers a bad refresh token with invalid_client, not invalid_grant.
+    expect(String(err)).toMatch(/refresh token .*invalid, expired or revoked/);
+    expect(String(err)).toMatch(/DIADOC_REFRESH_TOKEN_FILE/);
     expect(String(err)).not.toMatch(/S3CR3T-VALUE/);
   });
 

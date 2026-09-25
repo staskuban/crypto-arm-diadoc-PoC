@@ -21,13 +21,19 @@ import {
   UtdError,
   type ContentPlacement,
   type ParseUtdOptions,
-  type UtdAttachmentInput,
   type UtdDocument,
 } from '../utd/index.js';
 import { toDocumentAttachment, toMessagePrototype } from './attachment.js';
 import { classifyConflict } from './conflict.js';
 import { PipelineError, type PipelineErrorCode, type PipelineStep } from './errors.js';
+import { customDocumentIdFor, isGuid } from './custom-document-id.js';
 import { isResendSalt, operationIdFor } from './operation-id.js';
+import {
+  checkSenderSignature,
+  describeSignatureCheck,
+  type SignatureCheck,
+  type SignatureCheckDiadoc,
+} from './signature-check.js';
 import {
   classifyVerifyFailure,
   cmsPolicyViolations,
@@ -46,7 +52,8 @@ import {
 export type PipelineDiadoc = Pick<
   DiadocClient,
   'canPostMessage' | 'shelfUpload' | 'postMessage' | 'getDocument'
->;
+> &
+  SignatureCheckDiadoc;
 
 export interface SendUtdInput {
   /** Bare file name; must be `ИдФайл.xml`. */
@@ -72,7 +79,10 @@ export interface SendUtdOptions {
   poll?: Partial<PollOptions>;
   /** PostMessage attempts while Diadoc answers 204. Default: the client's. */
   postMaxAttempts?: number;
-  /** Sent as the attachment's CustomDocumentId; part of the operationId. */
+  /**
+   * Sent as the attachment's CustomDocumentId (CanPostMessage and PostMessage); part of the
+   * operationId. Must be a GUID (D192). Default: derived from the operationId (D200).
+   */
   customDocumentId?: string;
   /**
    * Deliberate resend of a УПД that was already posted (e.g. after the recipient rejected it): the
@@ -93,6 +103,8 @@ export interface SendUtdOptions {
 
 export interface SendUtdResult {
   operationId: string;
+  /** Given, or derived from the operationId. */
+  customDocumentId: string;
   /** The resend salt, when this was a deliberate resend. */
   resend?: string;
   fileName: string;
@@ -113,7 +125,20 @@ export interface SendUtdResult {
   polls: number;
   /** Non-blocking CanPostMessage findings. */
   warnings: MessageValidationError[];
+  /**
+   * Why Diadoc rejected the sender signature (D203): set when the docflow ended in an error or
+   * SenderSignatureStatus says the signature is invalid.
+   */
+  signatureCheck?: SignatureCheck;
 }
+
+/**
+ * Deadline for GetMessage/GetSignatureInfo after polling (which may have used up its own). A soft
+ * one, like every RequestOptions deadline: it bounds retry pauses and token refreshes, each request
+ * keeps its own timeout. Above the IdP's 30 s, so a token refresh can still start (auth.ts starts one
+ * only if its full timeout ends before the deadline).
+ */
+const SIGNATURE_CHECK_TIMEOUT_MS = 90_000;
 
 /**
  * Signs a УПД and posts it to Diadoc. The operationId is derived from boxes + ИдФайл + content +
@@ -133,6 +158,12 @@ export async function sendUtd(
   if (resend !== undefined && !isResendSalt(resend)) {
     throw new Error(
       `resend salt ${JSON.stringify(resend)} is invalid: use 1-128 of [A-Za-z0-9._:-]`,
+    );
+  }
+  if (options.customDocumentId !== undefined && !isGuid(options.customDocumentId)) {
+    throw new Error(
+      `customDocumentId ${JSON.stringify(options.customDocumentId)} must be a GUID ` +
+        '(xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): CanPostMessage refuses anything else (D192)',
     );
   }
   const log = deps.log ?? (() => undefined);
@@ -166,6 +197,7 @@ export async function sendUtd(
     customDocumentId: options.customDocumentId,
     resend,
   });
+  const customDocumentId = options.customDocumentId ?? customDocumentIdFor(operationId);
   log(
     `parsed ${utd.fileName}: ${utd.function} ${utd.version}, ${String(utd.content.length)} bytes`,
   );
@@ -224,7 +256,7 @@ export async function sendUtd(
 
   // 4. Domain attachment (checks DER framing).
   const attachment = step('attach', 'INVALID_SIGNATURE', () =>
-    buildAttachment(utd, signature, options.customDocumentId),
+    buildUtdAttachment(utd, signature, { customDocumentId }),
   );
 
   // 5. Pre-check before any side effect on Diadoc (shelf upload, post).
@@ -310,12 +342,32 @@ export async function sendUtd(
     },
     { ...DEFAULT_POLL_OPTIONS, ...options.poll },
   );
+  let signatureCheck: SignatureCheck | undefined;
+  const document = poll.document;
+  if (
+    document !== undefined &&
+    (poll.outcome === 'error' ||
+      document.SenderSignatureStatus === 'SenderSignatureCheckedAndInvalid')
+  ) {
+    signatureCheck = await checkSenderSignature(
+      { boxId: fromBoxId, messageId: message.MessageId, entityId: entity.EntityId },
+      document,
+      deps.diadoc,
+      { deadline: now() + SIGNATURE_CHECK_TIMEOUT_MS, ...callOptions },
+    );
+  }
   log(
     `status: ${poll.outcome}${poll.status?.PrimaryStatus?.StatusText ? ` (${poll.status.PrimaryStatus.StatusText})` : ''} after ${String(poll.polls)} polls`,
   );
 
+  if (signatureCheck !== undefined) {
+    const statusText = poll.status?.PrimaryStatus?.StatusText;
+    log(`sender signature: ${describeSignatureCheck(signatureCheck, statusText)}`);
+  }
+
   return {
     operationId,
+    customDocumentId,
     ...(resend === undefined ? {} : { resend }),
     fileName: utd.fileName,
     fromBoxId,
@@ -330,6 +382,7 @@ export async function sendUtd(
     ...(poll.statusError === undefined ? {} : { statusError: poll.statusError }),
     polls: poll.polls,
     warnings,
+    ...(signatureCheck === undefined ? {} : { signatureCheck }),
   };
 
   function step<T>(name: PipelineStep, code: PipelineErrorCode, fn: () => T): T {
@@ -360,18 +413,6 @@ export async function sendUtd(
     const authCode = diadocStep && isAuthFailure(error) ? 'DIADOC_AUTH' : code;
     return new PipelineError(authCode, name, describe(error), { cause: error, operationId });
   }
-}
-
-function buildAttachment(
-  utd: UtdDocument,
-  signature: Buffer,
-  customDocumentId: string | undefined,
-): UtdAttachmentInput {
-  return buildUtdAttachment(
-    utd,
-    signature,
-    customDocumentId === undefined ? {} : { customDocumentId },
-  );
 }
 
 function postError(error: unknown, operationId: string, resend: string | undefined): unknown {

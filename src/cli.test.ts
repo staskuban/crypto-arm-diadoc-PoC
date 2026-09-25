@@ -22,6 +22,7 @@ const ENV = { DIADOC_FROM_BOX_ID: 'from', DIADOC_TO_BOX_ID: 'to' };
 
 const RESULT: SendUtdResult = {
   operationId: 'op',
+  customDocumentId: '6f9619ff-8b86-d011-b42d-00cf4fc964ff',
   fileName: 'f.xml',
   fromBoxId: 'from',
   toBoxId: 'to',
@@ -186,6 +187,139 @@ describe('cli', () => {
     );
     expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
     expect(JSON.parse(out.join(''))).toMatchObject({ statusError: 'Error: x' });
+  });
+
+  it('names why Diadoc rejected the sender signature (D203), still exit 3', async () => {
+    const { deps, out, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        outcome: 'error',
+        final: true,
+        status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка в подписи' } },
+        signatureCheck: {
+          senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
+          reason: 'certificate',
+          mathValid: true,
+          certificateValid: false,
+          chainProblems: ['PARTIAL_CHAIN'],
+          delivered: false,
+          deliveryFailure: 'не была доставлена',
+          powerOfAttorney: [],
+          lookupErrors: [],
+        },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
+    expect(err.join('')).toMatch(
+      /^docflow error \[SENDER_CERTIFICATE_REJECTED\] .*PARTIAL_CHAIN.*not delivered: не была доставлена.* \(operationId op, messageId m\)$/m,
+    );
+    expect(JSON.parse(out.join(''))).toMatchObject({ signatureCheck: { reason: 'certificate' } });
+  });
+
+  it('exits 3 for a rejected sender signature while the status is still pending', async () => {
+    const { deps, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        signatureCheck: {
+          reason: 'signature',
+          mathValid: false,
+          chainProblems: [],
+          powerOfAttorney: [],
+          lookupErrors: [],
+        },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
+    expect(err.join('')).toMatch(/^docflow error \[SENDER_SIGNATURE_REJECTED\] /m);
+  });
+
+  it('exits 3 for an invalid SenderSignatureStatus whose lookups failed (pending status)', async () => {
+    const { deps, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        signatureCheck: {
+          reason: 'unknown',
+          senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
+          chainProblems: [],
+          powerOfAttorney: [],
+          lookupErrors: ['GetMessage: busy'],
+        },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
+    expect(err.join('')).toMatch(/^docflow error \[SENDER_SIGNATURE_REJECTED\] /m);
+  });
+
+  it('keeps the status text of an error that is not about the signature', async () => {
+    const { deps, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        outcome: 'error',
+        final: true,
+        status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка доставки' } },
+        signatureCheck: {
+          reason: 'none',
+          chainProblems: [],
+          powerOfAttorney: [],
+          lookupErrors: [],
+        },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
+    expect(err.join('')).toMatch(/^docflow error \[DOCFLOW_ERROR\] Ошибка доставки/m);
+  });
+
+  it('exits 0 when the check found no problem and the status is not an error', async () => {
+    const { deps, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        signatureCheck: {
+          reason: 'none',
+          chainProblems: [],
+          powerOfAttorney: [],
+          lookupErrors: [],
+        },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(err.join('')).not.toMatch(/docflow error/);
+  });
+
+  it('prints a plain docflow error line without a signature check', async () => {
+    const { deps, err } = setup(() =>
+      Promise.resolve({
+        ...RESULT,
+        outcome: 'error',
+        final: true,
+        status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка' } },
+      }),
+    );
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.docflowError);
+    expect(err.join('')).toMatch(
+      /^docflow error \[DOCFLOW_ERROR\] Ошибка \(operationId op, messageId m\)$/m,
+    );
+  });
+
+  it('passes GetMessage and GetSignatureInfo through to the Diadoc client', async () => {
+    const seen: string[] = [];
+    const { deps } = setup(async (_input, d) => {
+      await d.diadoc.getMessage('b', 'm');
+      await d.diadoc.getSignatureInfo({ boxId: 'b', messageId: 'm', entityId: 's' });
+      return RESULT;
+    });
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        getMessage: () => {
+          seen.push('getMessage');
+          return Promise.resolve({ MessageId: 'm' });
+        },
+        getSignatureInfo: () => {
+          seen.push('getSignatureInfo');
+          return Promise.resolve({});
+        },
+      } as unknown as PipelineDiadoc);
+    expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
+    expect(seen).toEqual(['getMessage', 'getSignatureInfo']);
   });
 
   it('exits 1 with the pipeline code on stderr', async () => {

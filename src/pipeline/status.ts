@@ -44,6 +44,8 @@ export interface PollResult {
   outcome: DocflowOutcome;
   /** Last DocflowStatus read successfully. */
   status?: DocflowStatus;
+  /** Last GetDocument answer with a DocflowStatus (SenderSignatureStatus and more). */
+  document?: Document;
   /** Set when the last GetDocument call failed. */
   statusError?: unknown;
   polls: number;
@@ -93,6 +95,7 @@ export async function pollDocflowStatus(
       delete result.statusError;
       if (doc.DocflowStatus) {
         result.status = doc.DocflowStatus;
+        result.document = doc;
         result.outcome = docflowOutcome(doc.DocflowStatus);
         if (result.outcome !== 'pending') return result;
       }
