@@ -493,14 +493,13 @@ describe('sendUtd failures before sending', () => {
   it('does not repeat a root cause the signer error already names', async () => {
     const { signer, run } = setup();
     signer.signResult = new SignerNetworkError('sign', {
-      step: 'upload',
       cause: new TypeError('fetch failed', {
-        cause: new Error('connect ECONNREFUSED 127.0.0.1:3040'),
+        cause: new Error('connect ECONNREFUSED 127.0.0.1:3037'),
       }),
     });
     // The pipeline's own "<step>: " prefix, then the signer message as is.
     expect((await failure(run())).message).toBe(
-      'sign: sign: upload: request failed: fetch failed: connect ECONNREFUSED 127.0.0.1:3040',
+      'sign: sign: request failed: fetch failed: connect ECONNREFUSED 127.0.0.1:3037',
     );
   });
 

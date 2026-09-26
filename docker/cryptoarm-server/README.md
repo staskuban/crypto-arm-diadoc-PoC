@@ -51,11 +51,9 @@ CRYPTOARM_SERVER_API_KEY="$(head -1 docker/cryptoarm-server/secrets/api_keys)" S
 ```
 
 Run compose from the repo root. The project name is then the worktree directory name: the shared stand is project
-`graph-root`, run from the `graph-root` worktree, with the network `graph-root_default` that the Документы stand
-joins. From this directory (or with `-f docker/cryptoarm-server/docker-compose.yml`) the same file is another
+`graph-root`, run from the `graph-root` worktree, with the network `graph-root_default`. From this directory (or with `-f docker/cryptoarm-server/docker-compose.yml`) the same file is another
 project, `kryptoarm-diadoc-cryptoarm-server`, with its own network: `ps` there shows nothing of the shared stand,
-and `up` there would hit the fixed container name. Stop with `docker compose stop` (the Документы stand first, see
-its README).
+and `up` there would hit the fixed container name. Stop with `docker compose stop`.
 Swagger is at http://localhost:3037/docs. The healthcheck calls `GET /health/memory`, which needs no API key.
 
 **Build and run are separate (D8).** `cryptoarm-server` has no `build` section and `pull_policy: never`. The image
@@ -154,7 +152,7 @@ running stand after a smoke run. The tmpfs mounts are empty after every start or
 | `/var/cache/fontconfig`     | tmpfs 16 MB           | font cache of the PDF reports                                                                                                 |
 
 The tmpfs mounts are `noexec,nosuid,nodev`. Fontconfig also tries to write `.uuid` files into `/usr/share/fonts`;
-that fails silently. The PDF report of the Документы smoke still works. The upstream TSL auto-update
+that fails silently. The upstream TSL auto-update
 (`TSL_AUTO_UPDATE_ENABLED`, off by default) writes into `./certs`, which is mounted read-only: leave it off.
 
 Limits (override them from the shell or in `docker/cryptoarm-server/.env`; compose interpolates the included file with the `.env` of its own directory, and the same file is also the container's `env_file`, see `.env.example`). A value above the CPUs of the Docker VM fails the start ("range of CPUs is from 0.01 to N"): `CRYPTOARM_SERVER_CPUS` (default `2`), `CRYPTOARM_SERVER_MEMORY`
@@ -168,8 +166,7 @@ file, nothing seeds the tmpfs: the API answers, but CSP fails with `Provider DLL
 compose file starts and signs as before (verified).
 
 **Rollout on the shared stand** (I6 + F10; done on the shared stand 2026-09-24, see the F10 row of `docs/plan.md`).
-Run it in the `graph-root` worktree **after** F10 is merged there, in a fresh terminal (no `CRYPTOARM_*` exports left over from a throwaway stand). Order: this server first, then the
-Документы stand of project `kryptoarm-diadoc-i2` (its README). The server container is recreated (~10 s until
+Run it in the `graph-root` worktree **after** F10 is merged there, in a fresh terminal (no `CRYPTOARM_*` exports left over from a throwaway stand). The server container is recreated (~10 s until
 `healthy` once the image is built), so warn whoever uses the stand. The git-ignored
 `docker/cryptoarm-server/{secrets,certs,cert_storage}` of `graph-root` hold the licence, the API key and the keys
 (including the I3 key of ООО «О2 ПЛАТФОРМА»): keep them, never `down -v` or `git clean` there. The blocks contain no
@@ -211,16 +208,15 @@ Run it in the `graph-root` worktree **after** F10 is merged there, in a fresh te
    unset K
    ```
 
-Then the Документы stand (its README, "Rollout on the shared stand"). It finds the new server container by name on
-the network `graph-root_default`, which survives the server's recreation (a Документы stand still on the old file
-kept signing, verified). `cert_storage` is a bind mount and is kept.
+`cert_storage` is a bind mount and is kept. (Until F21 the КриптоАРМ Документы stand was rolled out next; it was
+removed in F21, see `docs/compare-documents.md`.)
 
 Until F10 is merged into them, worktrees branched from `graph-root` between F9 and F10 still carry the I6 file with
 the old default `…:local`: do not build or start the server stand from them (a `build cryptoarm-server-image` there
 moves `…:local`; the rollback below re-tags it from `…:pre-i6`).
 
 Rehearsed end to end on throwaway stands (F10, 2026-09-24): an I5 stand (the I5 image under the I5 file, with a
-freshly issued О2 key) and a pre-I6 Документы stand, both smoke-tested; then, with the F10 files, `up -d` and
+freshly issued О2 key) and a pre-I6 Документы stand (removed in F21), both smoke-tested; then, with the F10 files, `up -d` and
 `run app` before the build failed with "No such image" and left the container untouched; then the steps above
 (with throwaway tags), both smokes with both certificates, the three signer integration tests (13 passed), the
 Документы rollout with both users (DB, users and documents kept), the rollback below, and `down -v` (the throwaway

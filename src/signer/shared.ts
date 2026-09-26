@@ -1,4 +1,4 @@
-// Helpers shared by the Signer implementations.
+// Helpers of the Signer implementation (ServerCmsSigner).
 import { Asn1Error, berToDer } from '../asn1/index.js';
 import { SignerConfigError, SignerResponseError, type SignerOperation } from './errors.js';
 import type { SignResult } from './signer.js';

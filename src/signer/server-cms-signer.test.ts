@@ -390,6 +390,27 @@ describe('ServerCmsSigner.sign', () => {
     );
   });
 
+  it('lists every address of an AggregateError root cause (localhost resolves to ::1 and 127.0.0.1)', async () => {
+    const refused = Object.assign(
+      new AggregateError(
+        [
+          new Error('connect ECONNREFUSED ::1:3037'),
+          new Error('connect ECONNREFUSED 127.0.0.1:3037'),
+        ],
+        '',
+      ),
+      { code: 'ECONNREFUSED' },
+    );
+    const { signer } = setup(() =>
+      Promise.reject(new TypeError('fetch failed', { cause: refused })),
+    );
+    const error = await signer.sign(data).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SignerNetworkError);
+    expect((error as Error).message).toBe(
+      'sign: request failed: fetch failed: connect ECONNREFUSED ::1:3037, connect ECONNREFUSED 127.0.0.1:3037',
+    );
+  });
+
   it('tells a refused redirect apart from a refused connection', async () => {
     const cause = new TypeError('fetch failed', { cause: new Error('unexpected redirect') });
     const { signer } = setup(() => Promise.reject(cause));
@@ -646,7 +667,7 @@ describe('ServerCmsSigner request size limit', () => {
     });
   });
 
-  it('exposes its limit so DocumentsCloudSigner can check the size before uploading (D50)', () => {
+  it('exposes its configured limit', () => {
     expect(setup(ok).signer.maxRequestBytes).toBe(DEFAULT_MAX_REQUEST_BYTES);
     expect(setup(ok, { maxRequestBytes: 1000 }).signer.maxRequestBytes).toBe(1000);
   });

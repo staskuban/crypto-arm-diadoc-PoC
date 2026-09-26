@@ -10,6 +10,8 @@ coverage/
 !.env.example
 # Diadoc refresh token persisted by the CLI (DIADOC_REFRESH_TOKEN_FILE) and its temp file
 .diadoc-refresh-token*
+# Left-over JWT and stand secrets of КриптоАРМ Документы (removed in F21): kept ignored so that
+# files still on disk in old worktrees are never committed
 .documents-jwt*
 *.pfx
 *.p12
@@ -23,9 +25,9 @@ docker/cryptoarm-server/secrets/*
 !docker/cryptoarm-server/secrets/.gitkeep
 docker/cryptoarm-server/certs/**/*.cer
 
-# КриптоАРМ Документы stand: licence, API keys, generated passwords
-docker/cryptoarm-documents/secrets/*
-!docker/cryptoarm-documents/secrets/.gitkeep
+# КриптоАРМ Документы stand (removed in F21): its licence, API keys and generated passwords may
+# still be on disk in an old worktree
+docker/cryptoarm-documents/
 
 # Other key/cert material and КриптоПро key containers
 *.key
