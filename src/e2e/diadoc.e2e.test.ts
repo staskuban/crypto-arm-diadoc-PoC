@@ -4,9 +4,9 @@
 //
 // Env: the Диадок settings as for the CLI (DIADOC_E2E_ENV_FILE=<.env> is read like
 // `node --env-file`, the process env wins), DIADOC_REFRESH_TOKEN_FILE required (a rotated token is
-// written back). The negative case also needs CRYPTOARM_SERVER_URL, CRYPTOARM_SERVER_API_KEY(_FILE)
+// written back). The negative case also needs CRYPTOARM_SERVER_URL, CRYPTOARM_SERVER_API_KEY
 // and SIGNER_CERT_PATH of a running КриптоАРМ Server stand; it is skipped without them. Probes of
-// open Диадок questions (D3 inline limit, D7 cached 400, D192) run only with DIADOC_E2E_PROBES=1.
+// open Диадок questions (D3 inline limit, D7 cached 400) run only with DIADOC_E2E_PROBES=1.
 // DIADOC_E2E_TRACE_FILE=<path> writes the HTTP trace (no bodies, tokens or document content).
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -19,9 +19,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { EXIT, main, onRefreshTokenRotated, type CliEnv } from '../cli.js';
 import {
+  DEFAULT_TOKEN_URL,
   DiadocClient,
   DiadocError,
-  findDocumentEntity,
   loadDiadocEnv,
   lockRefreshTokenFile,
   RefreshTokenAuth,
@@ -35,6 +35,9 @@ import { buildTestUtd, partyFromOrganization, type Party, type TestUtd } from '.
 const enabled = process.env.DIADOC_E2E === '1';
 const probes = enabled && process.env.DIADOC_E2E_PROBES === '1';
 const MAX_POSTS = Number(process.env.DIADOC_E2E_MAX_POSTS ?? '10');
+if (!Number.isInteger(MAX_POSTS) || MAX_POSTS < 0) {
+  throw new Error('DIADOC_E2E_MAX_POSTS must be a non-negative integer');
+}
 /** Delivery and the signature check took ~20 s in S1; the shelf cases may take longer. */
 const DELIVERY_TIMEOUT_MS = 240_000;
 const CASE_TIMEOUT_MS = 600_000;
@@ -45,11 +48,13 @@ function loadEnv(): CliEnv {
   return { ...fromFile, ...process.env };
 }
 const ENV: CliEnv = enabled ? loadEnv() : {};
+/** The IdP host: its answers and query parameters stay out of the trace. */
+const IDP_HOST = new URL(ENV.DIADOC_TOKEN_URL ?? DEFAULT_TOKEN_URL).host;
 const serverSigner =
   enabled &&
   Boolean(ENV.CRYPTOARM_SERVER_URL) &&
   Boolean(ENV.SIGNER_CERT_PATH) &&
-  Boolean(ENV.CRYPTOARM_SERVER_API_KEY ?? ENV.CRYPTOARM_SERVER_API_KEY_FILE);
+  Boolean(ENV.CRYPTOARM_SERVER_API_KEY);
 
 // --- HTTP trace (and the PostMessage cap) ---------------------------------------------------
 
@@ -87,7 +92,7 @@ const ANSWER_PATHS = new Set([
 
 async function tracingFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input);
-  const isIdp = url.host.startsWith('identity.');
+  const isIdp = url.host === IDP_HOST;
   const entry: TraceEntry = {
     at: new Date().toISOString(),
     method: init?.method ?? 'GET',
@@ -195,7 +200,7 @@ async function runCli(args: string[], env: CliEnv): Promise<CliRun> {
   const code = await main(args, {
     env: {
       ...ENV,
-      PIPELINE_STATUS_TIMEOUT_MS: '120000',
+      PIPELINE_STATUS_TIMEOUT_MS: '30000',
       PIPELINE_STATUS_MAX_DELAY_MS: '10000',
       ...env,
     },
@@ -206,6 +211,8 @@ async function runCli(args: string[], env: CliEnv): Promise<CliRun> {
       err.push(t);
       process.stderr.write(t);
     },
+    // Stops the CLI (and frees the token lock) before vitest gives up on the case.
+    signal: AbortSignal.timeout(CASE_TIMEOUT_MS - 60_000),
   });
   const stdout = out.join('');
   const run: CliRun = { code, stdout, stderr: err.join('') };
@@ -442,7 +449,11 @@ describe.skipIf(!enabled)('Диадок e2e (live, test boxes)', () => {
     'КриптоАРМ Server CMS from the test CA: posted, «Ошибка в подписи», exit 3 with the reason (D202)',
     async () => {
       const { path } = await newUtd();
-      const run = await runCli(['send', path], { SIGNER_KIND: 'server' });
+      // Polling ends at the error status; the long deadline only covers a slow signature check.
+      const run = await runCli(['send', path], {
+        SIGNER_KIND: 'server',
+        PIPELINE_STATUS_TIMEOUT_MS: '120000',
+      });
 
       expect(run.code).toBe(EXIT.docflowError);
       expect(run.stderr).toMatch(/^docflow error \[SENDER_CERTIFICATE_REJECTED\] /m);
@@ -463,55 +474,55 @@ describe.skipIf(!enabled)('Диадок e2e (live, test boxes)', () => {
   );
 
   describe.skipIf(!probes)('probes of open Диадок questions', () => {
-    const attachment = (utd: TestUtd, customDocumentId: string) => ({
+    const attachment = (utd: TestUtd, version: string) => ({
       TypeNamedId: 'UniversalTransferDocument',
       Function: 'СЧФДОП',
-      Version: 'utd970_05_03_01',
+      Version: version,
       SignedContent: { Content: utd.content, SignWithTestSignature: true as const },
-      CustomDocumentId: customDocumentId,
+      CustomDocumentId: randomUUID(),
     });
-    const post = (utd: TestUtd, customDocumentId: string, operationId: string) =>
+    const post = (utd: TestUtd, operationId: string, version = 'utd970_05_03_01') =>
       withDiadoc((client) =>
         client
           .postMessage(
-            {
-              FromBoxId: FROM,
-              ToBoxId: TO,
-              DocumentAttachments: [attachment(utd, customDocumentId)],
-            },
+            { FromBoxId: FROM, ToBoxId: TO, DocumentAttachments: [attachment(utd, version)] },
             { operationId },
           )
           .then(
-            (m) => ({ ok: true as const, messageId: m.MessageId, entity: findDocumentEntity(m) }),
+            (m) => ({ ok: true as const, messageId: m.MessageId }),
             (e: unknown) => {
               if (!(e instanceof DiadocError)) throw e;
-              return { ok: false as const, status: e.status, text: e.body.slice(0, 500) };
+              return { ok: false as const, status: e.status, text: e.body.slice(0, 300) };
             },
           ),
       );
 
+    // Live 2026-09-26 (D220): accepted, so "500 KB" is not 500 000 B; the pipeline keeps 500 000.
     it(
-      'D3: 510 000 B inline Content (the pipeline would use the shelf)',
+      'D3: 510 000 B inline Content is accepted (the pipeline would use the shelf)',
       async () => {
         const { utd } = await newUtd(510_000);
-        const outcome = await post(utd, randomUUID(), randomBytes(32).toString('hex'));
-        process.stderr.write(`D3 inline 510 000 B: ${JSON.stringify(outcome)}\n`);
-        expect(typeof outcome.ok).toBe('boolean');
+        const outcome = await post(utd, randomBytes(32).toString('hex'));
+        process.stderr.write(
+          `D3 inline ${String(utd.content.length)} B: ${JSON.stringify(outcome)}\n`,
+        );
+        expect(outcome.ok).toBe(true);
       },
       CASE_TIMEOUT_MS,
     );
 
     it(
-      'D192/D7: a non-GUID CustomDocumentId in PostMessage, then the same operationId fixed',
+      'D7: a PostMessage rejected with 400, then the same operationId with a valid body',
       async () => {
         const { utd } = await newUtd();
         const operationId = randomBytes(32).toString('hex');
-        const first = await post(utd, 'not-a-guid', operationId);
-        process.stderr.write(`D192 PostMessage non-GUID: ${JSON.stringify(first)}\n`);
-        if (first.ok) return; // D192 answered (accepted); a repeat would only be a replay (S1).
-        const second = await post(utd, randomUUID(), operationId);
-        process.stderr.write(`D7 same operationId after a 400: ${JSON.stringify(second)}\n`);
-        expect(typeof second.ok).toBe('boolean');
+        const first = await post(utd, operationId, 'utd970_99_99_99');
+        process.stderr.write(`D7 rejected body: ${JSON.stringify(first)}\n`);
+        expect(first.ok).toBe(false);
+        const second = await post(utd, operationId);
+        process.stderr.write(`D7 same operationId, valid body: ${JSON.stringify(second)}\n`);
+        // Live 2026-09-26 (D221): a 400 is not replayed; the fixed body posts a new message.
+        expect(second.ok).toBe(true);
       },
       CASE_TIMEOUT_MS,
     );
