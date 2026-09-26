@@ -47,6 +47,7 @@ const diadoc: PipelineDiadoc = {
   getDocument: () => Promise.reject(REACHED_DIADOC),
   getMessage: () => Promise.reject(REACHED_DIADOC),
   getSignatureInfo: () => Promise.reject(REACHED_DIADOC),
+  getOrganization: () => Promise.reject(REACHED_DIADOC),
 };
 
 async function send(signer: Signer): Promise<PipelineError> {

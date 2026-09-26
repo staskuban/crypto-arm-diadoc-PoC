@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server (or КриптоАРМ
-// Документы cloud-sign, SIGNER_KIND=documents) and posts it to Diadoc.
+// Документы cloud-sign, SIGNER_KIND=documents; or Diadoc's test signature, SIGNER_KIND=diadoc-test)
+// and posts it to Diadoc.
 // Settings come from env (see .env.example); `npm run cli -- send <file.xml>` loads ./.env.
 import { writeSync } from 'node:fs';
 import { readFile as fsReadFile, stat } from 'node:fs/promises';
@@ -28,7 +29,8 @@ import {
   type PipelineDiadoc,
   type SendUtdResult,
 } from './pipeline/index.js';
-import { createSignerFromEnv, type Signer } from './signer/index.js';
+import { createSignerFromEnv, signerKind, type Signer } from './signer/index.js';
+import { DIADOC_TEST_SIGNATURE } from './utd/index.js';
 
 export type CliEnv = Record<string, string | undefined>;
 
@@ -71,7 +73,7 @@ export interface CliDeps {
   readFile: (path: string) => Promise<Buffer>;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
-  createSigner?: (env: CliEnv) => Promise<Signer>;
+  createSigner?: (env: CliEnv) => Promise<Signer | typeof DIADOC_TEST_SIGNATURE>;
   createDiadoc?: (
     env: CliEnv,
     stderr: (text: string) => void,
@@ -84,8 +86,8 @@ export interface CliDeps {
 
 const USAGE = `Usage: cli send <file.xml> [--no-precheck] [--resend[=<salt>]]
 
-Signs the УПД with КриптоАРМ Server (SIGNER_KIND=documents: КриптоАРМ Документы cloud-sign)
-and posts it to Контур.Диадок.
+Signs the УПД with КриптоАРМ Server (SIGNER_KIND=documents: КриптоАРМ Документы cloud-sign;
+SIGNER_KIND=diadoc-test: Diadoc's test signature, test boxes only) and posts it to Контур.Диадок.
 The file name must be ИдФайл + ".xml"; the bytes are signed and sent unchanged.
 Sending the same file again reuses its operationId (Diadoc treats it as the same send).
 --resend posts it once more on purpose under a new operationId (random salt, printed on stderr);
@@ -214,6 +216,7 @@ function tracked(diadoc: PipelineDiadoc, state: RunState): PipelineDiadoc {
     getDocument: (ref, o) => diadoc.getDocument(ref, o),
     getMessage: (boxId, messageId, o) => diadoc.getMessage(boxId, messageId, o),
     getSignatureInfo: (ref, o) => diadoc.getSignatureInfo(ref, o),
+    getOrganization: (boxId, o) => diadoc.getOrganization(boxId, o),
     postMessage: async (message, o) => {
       state.operationId = o.operationId;
       const posted = await diadoc.postMessage(message, o);
@@ -223,9 +226,12 @@ function tracked(diadoc: PipelineDiadoc, state: RunState): PipelineDiadoc {
   };
 }
 
-/** SIGNER_KIND=server (default) or documents, see createSignerFromEnv. */
-function createSigner(env: CliEnv): Promise<Signer> {
-  return createSignerFromEnv(env);
+/**
+ * SIGNER_KIND=server (default) or documents, see createSignerFromEnv; diadoc-test: no signer, the
+ * Diadoc test signature (sendUtd refuses it unless both boxes are test organisations).
+ */
+async function createSigner(env: CliEnv): Promise<Signer | typeof DIADOC_TEST_SIGNATURE> {
+  return signerKind(env) === 'diadoc-test' ? DIADOC_TEST_SIGNATURE : createSignerFromEnv(env);
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   type MessagePrototype,
   type MessageToPost,
   type MessageValidationResult,
+  type Organization,
   type PostMessageOptions,
   type RequestOptions,
   type ShelfUploadOptions,
@@ -31,7 +32,7 @@ import {
   type VerifyResult,
 } from '../signer/index.js';
 import { derChildren, parseCmsSignedData, readDer } from '../asn1/index.js';
-import { UtdError } from '../utd/index.js';
+import { DIADOC_TEST_SIGNATURE, UtdError } from '../utd/index.js';
 import { PipelineError } from './errors.js';
 import { customDocumentIdFor } from './custom-document-id.js';
 import { operationIdFor, type OperationKey } from './operation-id.js';
@@ -172,6 +173,18 @@ class FakeDiadoc implements PipelineDiadoc {
     return settle(this.message);
   }
 
+  organizations: Record<string, Organization | Error> = {
+    [FROM]: { IsTest: true, ShortName: 'Тестовая организация №1' },
+    [TO]: { IsTest: true, ShortName: 'Тестовая организация №2' },
+  };
+  organizationOptions: (RequestOptions | undefined)[] = [];
+
+  getOrganization(boxId: string, options?: RequestOptions): Promise<Organization> {
+    this.calls.push(`getOrganization ${boxId}`);
+    this.organizationOptions.push(options);
+    return settle(this.organizations[boxId] ?? new Error(`unknown box ${boxId}`));
+  }
+
   getSignatureInfo(ref: DocumentRef, options?: RequestOptions): Promise<SignatureInfo> {
     this.calls.push('getSignatureInfo');
     this.lookups.push([ref, options]);
@@ -183,7 +196,7 @@ function settle<T>(value: T | Error): Promise<T> {
   return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
 }
 
-function setup(options: Partial<SendUtdOptions> = {}) {
+function setup(options: Partial<SendUtdOptions> = {}, testSignature = false) {
   const signer = new FakeSigner();
   const diadoc = new FakeDiadoc();
   let clock = NOW;
@@ -193,7 +206,7 @@ function setup(options: Partial<SendUtdOptions> = {}) {
     sendUtd(
       input,
       {
-        signer,
+        signer: testSignature ? DIADOC_TEST_SIGNATURE : signer,
         diadoc,
         now: () => clock,
         sleep: (ms) => {
@@ -1055,5 +1068,127 @@ describe('sendUtd cancellation and options', () => {
     const { logs, run } = setup();
     await run();
     expect(logs.join('\n')).toMatch(/parsed[\s\S]*signed[\s\S]*verified[\s\S]*posted[\s\S]*status/);
+  });
+});
+
+describe('sendUtd with the Diadoc test signature (SIGNER_KIND=diadoc-test, D202)', () => {
+  const testOpId = (key: Partial<OperationKey> = {}): string =>
+    opId({ testSignature: true, ...key });
+
+  it('checks both boxes are test organisations, skips our signer and posts SignWithTestSignature', async () => {
+    const { signer, diadoc, logs, run } = setup({}, true);
+
+    const result = await run();
+
+    expect(signer.signed).toEqual([]);
+    expect(signer.verified).toEqual([]);
+    expect(diadoc.calls).toEqual([
+      `getOrganization ${FROM}`,
+      `getOrganization ${TO}`,
+      'canPostMessage',
+      'postMessage',
+      'getDocument',
+    ]);
+    const post = diadoc.posts[0];
+    expect(post?.options.operationId).toBe(testOpId());
+    expect(post?.message.DocumentAttachments[0]).toEqual({
+      TypeNamedId: 'UniversalTransferDocument',
+      Function: 'СЧФДОП',
+      Version: 'utd970_05_03_01',
+      SignedContent: { Content: CONTENT, SignWithTestSignature: true },
+      CustomDocumentId: customDocumentIdFor(testOpId()),
+    });
+    expect(result).toMatchObject({
+      operationId: testOpId(),
+      customDocumentId: customDocumentIdFor(testOpId()),
+      testSignature: true,
+      outcome: 'success',
+    });
+    expect(testOpId()).not.toBe(opId());
+    expect(logs.join('\n')).toMatch(/Diadoc test signature/);
+  });
+
+  it('uses the shelf for large content like a real send', async () => {
+    const { diadoc, run } = setup({}, true);
+    const content = padded(SHELF_UPLOAD_MAX_BYTES + 1);
+
+    const result = await run({ fileName: FILE_NAME, content });
+
+    expect(diadoc.uploads[0]?.content.equals(content)).toBe(true);
+    expect(diadoc.posts[0]?.message.DocumentAttachments[0]?.SignedContent).toEqual({
+      NameOnShelf: 'dd-api-shelf',
+      SignWithTestSignature: true,
+    });
+    expect(result.contentPlacement).toBe('shelf');
+  });
+
+  it('runs the box check even without the precheck', async () => {
+    const { diadoc, run } = setup({ precheck: false }, true);
+    await run();
+    expect(diadoc.calls.slice(0, 3)).toEqual([
+      `getOrganization ${FROM}`,
+      `getOrganization ${TO}`,
+      'postMessage',
+    ]);
+  });
+
+  it.each<[string, Organization]>([
+    ['IsTest false', { IsTest: false, ShortName: 'ООО Реальная' }],
+    ['no IsTest', { ShortName: 'ООО Без флага' }],
+  ])(
+    'refuses a recipient that is not a test organisation (%s) before any side effect',
+    async (_n, org) => {
+      const { diadoc, run } = setup({}, true);
+      diadoc.organizations[TO] = org;
+
+      const error = await failure(run());
+
+      expect(error.code).toBe('TEST_SIGNATURE_REFUSED');
+      expect(error.step).toBe('precheck');
+      expect(error.operationId).toBe(testOpId());
+      expect(error.message).toContain(TO);
+      expect(error.message).toContain(org.ShortName);
+      expect(diadoc.calls).toEqual([`getOrganization ${FROM}`, `getOrganization ${TO}`]);
+    },
+  );
+
+  it('refuses a sender that is not a test organisation', async () => {
+    const { diadoc, run } = setup({ precheck: false }, true);
+    diadoc.organizations[FROM] = { IsTest: false };
+
+    const error = await failure(run());
+
+    expect(error.code).toBe('TEST_SIGNATURE_REFUSED');
+    expect(error.message).toContain(FROM);
+    expect(diadoc.calls).not.toContain('postMessage');
+  });
+
+  it('fails as PRECHECK_FAILED when GetOrganization fails, DIADOC_AUTH on a token error', async () => {
+    const first = setup({}, true);
+    first.diadoc.organizations[TO] = new DiadocError('GET', '/GetOrganization', 403, 'Forbidden');
+    const error = await failure(first.run());
+    expect(error.code).toBe('PRECHECK_FAILED');
+    expect(first.diadoc.calls).not.toContain('postMessage');
+
+    const second = setup({}, true);
+    second.diadoc.organizations[FROM] = new DiadocAuthError(
+      'token endpoint said 400',
+      400,
+      'invalid_client',
+    );
+    expect((await failure(second.run())).code).toBe('DIADOC_AUTH');
+  });
+
+  it('passes the abort signal to GetOrganization', async () => {
+    const controller = new AbortController();
+    const { diadoc, run } = setup({ signal: controller.signal }, true);
+    await run();
+    expect(diadoc.organizationOptions[0]?.signal).toBe(controller.signal);
+  });
+
+  it('a real send does not call GetOrganization', async () => {
+    const { diadoc, run } = setup();
+    await run();
+    expect(diadoc.calls.some((c) => c.startsWith('getOrganization'))).toBe(false);
   });
 });

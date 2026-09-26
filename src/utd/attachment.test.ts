@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildUtdAttachment, contentPlacement, INLINE_CONTENT_LIMIT } from './attachment.js';
+import {
+  buildUtdAttachment,
+  contentPlacement,
+  DIADOC_TEST_SIGNATURE,
+  INLINE_CONTENT_LIMIT,
+} from './attachment.js';
 import { UtdError } from './errors.js';
 import type { UtdDocument } from './parse.js';
 
@@ -46,6 +51,14 @@ describe('buildUtdAttachment', () => {
     });
     expect(attachment.content).toBe(content);
     expect(attachment.signature).toBe(signature);
+  });
+
+  it('takes the Diadoc test signature instead of a CMS (no DER check)', () => {
+    const content = Buffer.from('x');
+    const attachment = buildUtdAttachment(doc(content), DIADOC_TEST_SIGNATURE);
+    expect(DIADOC_TEST_SIGNATURE).toBe('diadoc-test');
+    expect(attachment.signature).toBe('diadoc-test');
+    expect(attachment.content).toBe(content);
   });
 
   it('marks large content for shelf upload', () => {

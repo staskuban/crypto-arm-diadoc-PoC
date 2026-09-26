@@ -16,6 +16,8 @@ export interface Organization {
   ShortName?: string;
   /** Participant id from the УПД file name (ИдОтпр / ИдПол). */
   FnsParticipantId?: string;
+  /** A test organisation (quickstart boxes, D191): only these may get `SignWithTestSignature`. */
+  IsTest?: boolean;
   Boxes?: Box[];
   [key: string]: unknown;
 }

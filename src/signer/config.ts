@@ -39,6 +39,20 @@ const PLACEHOLDERS = new Set(['changeme', 'change-me-api-key']);
 const JWT_MIN_LIFETIME_MS = 5 * 60_000;
 
 /**
+ * `SIGNER_KIND`: `server` (default), `documents`, or `diadoc-test` (no signer of ours: Diadoc signs
+ * with its test certificate, test boxes only; the pipeline checks the boxes, D202).
+ */
+export type SignerKind = 'server' | 'documents' | 'diadoc-test';
+
+export function signerKind(env: SignerEnv = process.env): SignerKind {
+  const kind = nonEmpty(env.SIGNER_KIND) ?? 'server';
+  if (kind === 'server' || kind === 'documents' || kind === 'diadoc-test') return kind;
+  throw new SignerConfigError(
+    `SIGNER_KIND must be "server", "documents" or "diadoc-test", got ${JSON.stringify(kind)}`,
+  );
+}
+
+/**
  * Builds the signer `SIGNER_KIND` selects: `server` (default, `ServerCmsSigner`, see
  * `loadServerCmsSignerOptions`) or `documents` (`DocumentsCloudSigner`, see
  * `loadDocumentsCloudSignerEnv`; it verifies on КриптоАРМ Server, so the server env is required too).
@@ -48,12 +62,12 @@ export async function createSignerFromEnv(
   readFile: ReadFile = fsReadFile,
   now: () => number = Date.now,
 ): Promise<Signer> {
-  const kind = nonEmpty(env.SIGNER_KIND) ?? 'server';
+  const kind = signerKind(env);
   if (kind === 'server')
     return new ServerCmsSigner(await loadServerCmsSignerOptions(env, readFile));
-  if (kind !== 'documents') {
+  if (kind === 'diadoc-test') {
     throw new SignerConfigError(
-      `SIGNER_KIND must be "server" or "documents", got ${JSON.stringify(kind)}`,
+      'SIGNER_KIND=diadoc-test has no signer: the pipeline posts with the Diadoc test signature',
     );
   }
   const options = await loadDocumentsCloudSignerEnv(env, readFile, now);

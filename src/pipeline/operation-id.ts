@@ -14,6 +14,11 @@ export interface OperationKey {
   customDocumentId?: string | undefined;
   /** Set only for a deliberate resend: every distinct salt is a new send. */
   resend?: string | undefined;
+  /**
+   * Signed by Diadoc's test signature instead of our signer: another send than a real one of the
+   * same file. Hashed only when true, so the keys of real sends stay as they were.
+   */
+  testSignature?: boolean | undefined;
 }
 
 /**
@@ -40,6 +45,10 @@ export function operationIdFor(key: OperationKey): string {
       update(PRESENT);
       update(Buffer.from(optional, 'utf8'));
     }
+  }
+  if (key.testSignature === true) {
+    update(PRESENT);
+    update(Buffer.from('diadoc-test-signature', 'utf8'));
   }
   return hash.digest('hex');
 }

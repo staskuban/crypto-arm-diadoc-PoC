@@ -1,4 +1,5 @@
 // УПД → sign → verify → DocumentAttachment → (CanPostMessage) → (ShelfUpload) → PostMessage → status.
+// With the Diadoc test signature: УПД → test-box check → DocumentAttachment → … (no signer, D202).
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -12,16 +13,19 @@ import {
   type DiadocClient,
   type DocflowStatus,
   type MessageValidationError,
+  type Organization,
 } from '../diadoc/index.js';
 import { Asn1Error } from '../asn1/index.js';
 import type { Signer } from '../signer/index.js';
 import {
   buildUtdAttachment,
+  DIADOC_TEST_SIGNATURE,
   parseUtd,
   UtdError,
   type ContentPlacement,
   type ParseUtdOptions,
   type UtdDocument,
+  type UtdSignature,
 } from '../utd/index.js';
 import { toDocumentAttachment, toMessagePrototype } from './attachment.js';
 import { classifyConflict } from './conflict.js';
@@ -51,7 +55,7 @@ import {
 /** The Diadoc calls the pipeline makes; `DiadocClient` satisfies it. */
 export type PipelineDiadoc = Pick<
   DiadocClient,
-  'canPostMessage' | 'shelfUpload' | 'postMessage' | 'getDocument'
+  'canPostMessage' | 'shelfUpload' | 'postMessage' | 'getDocument' | 'getOrganization'
 > &
   SignatureCheckDiadoc;
 
@@ -63,7 +67,12 @@ export interface SendUtdInput {
 }
 
 export interface SendUtdDeps {
-  signer: Signer;
+  /**
+   * Our signer, or DIADOC_TEST_SIGNATURE: Diadoc signs with its test certificate
+   * (`SignWithTestSignature`), our signer and the signature policy are skipped, and both boxes must
+   * be test organisations (`GetOrganization` → `IsTest`), checked before any side effect.
+   */
+  signer: Signer | typeof DIADOC_TEST_SIGNATURE;
   diadoc: PipelineDiadoc;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -107,6 +116,8 @@ export interface SendUtdResult {
   customDocumentId: string;
   /** The resend salt, when this was a deliberate resend. */
   resend?: string;
+  /** Signed with the Diadoc test signature (test boxes only), not by our signer. */
+  testSignature?: true;
   fileName: string;
   fromBoxId: string;
   toBoxId: string;
@@ -189,6 +200,7 @@ export async function sendUtd(
     // Before the operationId exists (it hashes ИдФайл), so not through `step`.
     throw new PipelineError('INVALID_UTD', 'parse', describe(error), { cause: error });
   }
+  const testSignature = deps.signer === DIADOC_TEST_SIGNATURE;
   const operationId = operationIdFor({
     fromBoxId,
     toBoxId,
@@ -196,63 +208,19 @@ export async function sendUtd(
     content: utd.content,
     customDocumentId: options.customDocumentId,
     resend,
+    testSignature,
   });
   const customDocumentId = options.customDocumentId ?? customDocumentIdFor(operationId);
   log(
     `parsed ${utd.fileName}: ${utd.function} ${utd.version}, ${String(utd.content.length)} bytes`,
   );
 
-  // 2–3. Sign and check our own signature before anything leaves the building: the structure
-  // (detached, one signer, the configured certificate) locally, then the math and chain upstream.
+  // 2–3. Sign (or check the boxes may take the Diadoc test signature).
   const now = deps.now ?? Date.now;
-  const certificate = step('sign', 'CERTIFICATE_INVALID', () =>
-    readSignerCertificate(deps.signer.certificate),
-  );
-  const expired = validityProblem(certificate, now());
-  if (expired !== undefined) {
-    throw new PipelineError('CERTIFICATE_INVALID', 'sign', expired, { operationId });
-  }
-  const { signature } = await stepAsync('sign', 'SIGN_FAILED', () =>
-    deps.signer.sign(utd.content, callOptions),
-  );
-  log(`signed: ${String(signature.length)} bytes of CMS`);
-  let structure: string[];
-  try {
-    structure = cmsPolicyViolations(signature, certificate);
-  } catch (error) {
-    if (!(error instanceof Asn1Error)) throw error;
-    throw new PipelineError(
-      'INVALID_SIGNATURE',
-      'policy',
-      `the signer returned no DER CMS SignedData: ${error.message}`,
-      { cause: error, operationId },
-    );
-  }
-  if (structure.length > 0) {
-    throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'policy', structure.join('; '), {
-      operationId,
-    });
-  }
-  const verification = await stepAsync('verify', 'VERIFY_FAILED', () =>
-    deps.signer.verify(utd.content, signature, callOptions),
-  );
-  if (!verification.valid) {
-    const failed = classifyVerifyFailure(verification, certificate, now());
-    throw new PipelineError(
-      failed.code,
-      'verify',
-      `signature over ${utd.fileName} is rejected: ${failed.message}`,
-      { details: verification.signers, operationId },
-    );
-  }
-  const verified = verifiedSignerViolations(verification, certificate);
-  if (verified.length > 0) {
-    throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'verify', verified.join('; '), {
-      details: verification.signers,
-      operationId,
-    });
-  }
-  log(`verified: signer ${certificate.thumbprint}`);
+  const signature: UtdSignature =
+    deps.signer === DIADOC_TEST_SIGNATURE
+      ? await checkTestBoxes()
+      : await signAndCheck(deps.signer);
 
   // 4. Domain attachment (checks DER framing).
   const attachment = step('attach', 'INVALID_SIGNATURE', () =>
@@ -369,6 +337,7 @@ export async function sendUtd(
     operationId,
     customDocumentId,
     ...(resend === undefined ? {} : { resend }),
+    ...(testSignature ? { testSignature: true as const } : {}),
     fileName: utd.fileName,
     fromBoxId,
     toBoxId,
@@ -384,6 +353,93 @@ export async function sendUtd(
     warnings,
     ...(signatureCheck === undefined ? {} : { signatureCheck }),
   };
+
+  /** Our own signature, checked before anything leaves the building. */
+  async function signAndCheck(signer: Signer): Promise<Buffer> {
+    // 2–3. Sign and check our own signature before anything leaves the building: the structure
+    // (detached, one signer, the configured certificate) locally, then the math and chain upstream.
+    const certificate = step('sign', 'CERTIFICATE_INVALID', () =>
+      readSignerCertificate(signer.certificate),
+    );
+    const expired = validityProblem(certificate, now());
+    if (expired !== undefined) {
+      throw new PipelineError('CERTIFICATE_INVALID', 'sign', expired, { operationId });
+    }
+    const { signature } = await stepAsync('sign', 'SIGN_FAILED', () =>
+      signer.sign(utd.content, callOptions),
+    );
+    log(`signed: ${String(signature.length)} bytes of CMS`);
+    let structure: string[];
+    try {
+      structure = cmsPolicyViolations(signature, certificate);
+    } catch (error) {
+      if (!(error instanceof Asn1Error)) throw error;
+      throw new PipelineError(
+        'INVALID_SIGNATURE',
+        'policy',
+        `the signer returned no DER CMS SignedData: ${error.message}`,
+        { cause: error, operationId },
+      );
+    }
+    if (structure.length > 0) {
+      throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'policy', structure.join('; '), {
+        operationId,
+      });
+    }
+    const verification = await stepAsync('verify', 'VERIFY_FAILED', () =>
+      signer.verify(utd.content, signature, callOptions),
+    );
+    if (!verification.valid) {
+      const failed = classifyVerifyFailure(verification, certificate, now());
+      throw new PipelineError(
+        failed.code,
+        'verify',
+        `signature over ${utd.fileName} is rejected: ${failed.message}`,
+        { details: verification.signers, operationId },
+      );
+    }
+    const verified = verifiedSignerViolations(verification, certificate);
+    if (verified.length > 0) {
+      throw new PipelineError('SIGNATURE_POLICY_VIOLATION', 'verify', verified.join('; '), {
+        details: verification.signers,
+        operationId,
+      });
+    }
+    log(`verified: signer ${certificate.thumbprint}`);
+    return signature;
+  }
+
+  /**
+   * The Diadoc test signature is for test boxes only: both boxes must be test organisations, so it
+   * can never reach a real counteragent. Runs with or without the precheck.
+   */
+  async function checkTestBoxes(): Promise<typeof DIADOC_TEST_SIGNATURE> {
+    for (const [role, boxId] of [
+      ['sender', fromBoxId],
+      ['recipient', toBoxId],
+    ] as const) {
+      signal?.throwIfAborted();
+      const organization = await stepAsync('precheck', 'PRECHECK_FAILED', async () => {
+        try {
+          return await deps.diadoc.getOrganization(boxId, callOptions);
+        } catch (error) {
+          throw signal?.aborted ? signal.reason : error;
+        }
+      });
+      if (organization.IsTest !== true) {
+        throw new PipelineError(
+          'TEST_SIGNATURE_REFUSED',
+          'precheck',
+          `the Diadoc test signature is only for test boxes, but the ${role} box ${boxId} ` +
+            `(${organizationName(organization)}) is not a test organisation ` +
+            `(IsTest: ${JSON.stringify(organization.IsTest ?? null)})`,
+          { operationId },
+        );
+      }
+    }
+    log('signature: the Diadoc test signature (SignWithTestSignature), both boxes are test boxes');
+    return DIADOC_TEST_SIGNATURE;
+  }
 
   function step<T>(name: PipelineStep, code: PipelineErrorCode, fn: () => T): T {
     try {
@@ -413,6 +469,10 @@ export async function sendUtd(
     const authCode = diadocStep && isAuthFailure(error) ? 'DIADOC_AUTH' : code;
     return new PipelineError(authCode, name, describe(error), { cause: error, operationId });
   }
+}
+
+function organizationName(o: Organization): string {
+  return o.ShortName ?? o.FullName ?? (o.Inn === undefined ? 'unknown' : `ИНН ${o.Inn}`);
 }
 
 function postError(error: unknown, operationId: string, resend: string | undefined): unknown {
