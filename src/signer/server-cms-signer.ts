@@ -55,7 +55,7 @@ export interface ServerCmsSignerOptions {
 export class ServerCmsSigner implements Signer {
   /** The configured public certificate (DER); every signature must be made by its key. */
   readonly certificate: Buffer;
-  /** Largest JSON request body sent (the server `JSON_LIMIT`); `DocumentsCloudSigner` checks it too (D50). */
+  /** Largest JSON request body sent (the server `JSON_LIMIT`). */
   readonly maxRequestBytes: number;
   readonly #baseUrl: URL;
   readonly #certificate: string;

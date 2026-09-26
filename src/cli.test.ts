@@ -385,10 +385,13 @@ describe('cli', () => {
   });
 
   it.each([
-    [{ SIGNER_KIND: 'documents' }, /^error \[SIGNER_CONFIG\] DOCUMENTS_URL is not set/],
+    [
+      { SIGNER_KIND: 'documents' },
+      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server" or "diadoc-test", got "documents"/,
+    ],
     [
       { SIGNER_KIND: 'hsm' },
-      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server", "documents" or "diadoc-test"/,
+      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server" or "diadoc-test"/,
     ],
   ])('default signer factory honours SIGNER_KIND %j', async (extra, message) => {
     const { deps, err } = setup(undefined, { ...ENV, ...extra });

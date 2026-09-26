@@ -93,7 +93,9 @@ Not observed (still open): a PostMessage `204` (+ `Retry-After`; every post answ
 - Build: upstream builds from its `docker/Dockerfile`; our stand builds `docker/cryptoarm-server/Dockerfile` locally (upstream base image pinned by digest, I5). Requires a human-downloaded КриптоПро CSP 5.0 `linux-amd64_deb.tgz` and a valid `TRUSTED_LICENSE` — without it the server exits `Trusted Crypto license is invalid` (restart loop; verified 2026-09-24). `CRYPTOPRO_LICENSE` is optional: empty = CSP Demo trial (~90 days from the first start of a fresh `cert_storage/`). x86_64 only. Licences and `API_KEYS` come from `secrets/<var>` files since I5 (env is the legacy path).
 - Test material in repo: `certs/crypto.root.test.cer`, `certs/cryptoarm.server.test.{cer,pfx}` (CRYPTO-PRO Test Center 2).
 
-## КриптоАРМ Документы
+## КриптоАРМ Документы (removed in F21)
+
+**Removed in F21 (2026-09-26), see `docs/compare-documents.md`:** after C1 the human decided that the pipeline does not need КриптоАРМ Документы; `DocumentsCloudSigner` (`SIGNER_KIND=documents`), the stand `docker/cryptoarm-documents`, its scripts and the comparison tooling were deleted, signing is КриптоАРМ Server only. The notes below are history; paths they name no longer exist.
 
 Status: no longer blocked — the Документы test licence arrived 2026-09-24 (expires 2026-10-24) and the I2 stand (`docker/cryptoarm-documents`) is merged and running (hardened in I6 and F17). The pipeline can sign through it: `DocumentsCloudSigner` (T7, `SIGNER_KIND=documents`, host only; polished in F14), with verification still on КриптоАРМ Server (D16). The discrepancies these findings cause for our code are D9–D16 and D50 in `docs/plan.md`.
 
