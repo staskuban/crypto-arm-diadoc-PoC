@@ -5,7 +5,8 @@
 // Env: the Диадок settings as for the CLI (DIADOC_E2E_ENV_FILE=<.env> is read like
 // `node --env-file`, the process env wins), DIADOC_REFRESH_TOKEN_FILE required (a rotated token is
 // written back). The negative case also needs CRYPTOARM_SERVER_URL, CRYPTOARM_SERVER_API_KEY
-// and SIGNER_CERT_PATH of a running КриптоАРМ Server stand; it is skipped without them. Probes of
+// and SIGNER_CERT_PATH of a running КриптоАРМ Server stand; it is skipped without them (its Документы
+// variant also needs DOCUMENTS_URL, DOCUMENTS_LOGIN, DOCUMENTS_PASSWORD_FILE, C1). Probes of
 // open Диадок questions (D3 inline limit, D7 cached 400) run only with DIADOC_E2E_PROBES=1.
 // DIADOC_E2E_TRACE_FILE=<path> writes the HTTP trace (no bodies, tokens or document content).
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -55,6 +56,14 @@ const serverSigner =
   Boolean(ENV.CRYPTOARM_SERVER_URL) &&
   Boolean(ENV.SIGNER_CERT_PATH) &&
   Boolean(ENV.CRYPTOARM_SERVER_API_KEY);
+/** The Документы negative case: the server env (its verifier) plus a Документы login (C1). */
+// SIGNER_CERT_PATH must be the .cer the CA stub maps to DOCUMENTS_LOGIN's e-mail, else the case
+// fails with SIGNATURE_POLICY_VIOLATION.
+const documentsSigner =
+  serverSigner &&
+  Boolean(ENV.DOCUMENTS_URL) &&
+  Boolean(ENV.DOCUMENTS_LOGIN) &&
+  Boolean(ENV.DOCUMENTS_PASSWORD_FILE ?? ENV.DOCUMENTS_PASSWORD);
 
 // --- HTTP trace (and the PostMessage cap) ---------------------------------------------------
 
@@ -445,31 +454,39 @@ describe.skipIf(!enabled)('Диадок e2e (live, test boxes)', () => {
     CASE_TIMEOUT_MS,
   );
 
+  async function testCaNegative(kind: 'server' | 'documents'): Promise<void> {
+    const { path } = await newUtd();
+    // Polling ends at the error status; the long deadline only covers a slow signature check.
+    const run = await runCli(['send', path], {
+      SIGNER_KIND: kind,
+      PIPELINE_STATUS_TIMEOUT_MS: '120000',
+    });
+
+    expect(run.code).toBe(EXIT.docflowError);
+    expect(run.stderr).toMatch(/^docflow error \[SENDER_CERTIFICATE_REJECTED\] /m);
+    expect(run.result).toMatchObject({
+      outcome: 'error',
+      status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка в подписи' } },
+      signatureCheck: {
+        senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
+        reason: 'certificate',
+        mathValid: true,
+        certificateValid: false,
+        delivered: false,
+      },
+    });
+    expect(run.result?.testSignature).toBeUndefined();
+  }
+
+  it.skipIf(!documentsSigner)(
+    'КриптоАРМ Документы cloud-sign CMS from the test CA: same result as the server path (C1)',
+    () => testCaNegative('documents'),
+    CASE_TIMEOUT_MS,
+  );
+
   it.skipIf(!serverSigner)(
     'КриптоАРМ Server CMS from the test CA: posted, «Ошибка в подписи», exit 3 with the reason (D202)',
-    async () => {
-      const { path } = await newUtd();
-      // Polling ends at the error status; the long deadline only covers a slow signature check.
-      const run = await runCli(['send', path], {
-        SIGNER_KIND: 'server',
-        PIPELINE_STATUS_TIMEOUT_MS: '120000',
-      });
-
-      expect(run.code).toBe(EXIT.docflowError);
-      expect(run.stderr).toMatch(/^docflow error \[SENDER_CERTIFICATE_REJECTED\] /m);
-      expect(run.result).toMatchObject({
-        outcome: 'error',
-        status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка в подписи' } },
-        signatureCheck: {
-          senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
-          reason: 'certificate',
-          mathValid: true,
-          certificateValid: false,
-          delivered: false,
-        },
-      });
-      expect(run.result?.testSignature).toBeUndefined();
-    },
+    () => testCaNegative('server'),
     CASE_TIMEOUT_MS,
   );
 
