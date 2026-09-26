@@ -1,0 +1,78 @@
+# Based on upstream docker/docker-compose.yml of https://git.digtlab.ru/trusted/cryptoarm/server
+# (commit af98d55e1974b87275b7fef97a20a6c32fb6f63b). See README.md in this directory.
+#
+# Build and run are separate services (D8): `cryptoarm-server` has no `build` section and never pulls,
+# so `docker compose run --build app` (root compose file) cannot rebuild or recreate it. The shared stand
+# is the ROOT compose project (`graph-root`, which `include`s this file); from the repo root:
+#   docker compose build cryptoarm-server-image && docker compose up -d --wait cryptoarm-server
+# Used alone (`-f` this file or from this directory) it is another project, `kryptoarm-diadoc-cryptoarm-server`,
+# with its own network, which the Документы stand (graph-root_default) does not join.
+# The default tag `…:stand-i6` belongs to this file (F10): the tmpfs below needs the I6 start.sh (D40). A host
+# with only an older image fails with "No such image" and keeps the running container; rolling a stand
+# onto this file: README.md "Rollout on the shared stand". A throwaway stand next to the shared one:
+# override CRYPTOARM_SERVER_IMAGE, CRYPTOARM_CONTAINER_NAME, CRYPTOARM_SERVER_PORT and -p, see README.md.
+name: kryptoarm-diadoc-cryptoarm-server
+
+services:
+  cryptoarm-server:
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:stand-i6}
+    pull_policy: never
+    platform: linux/amd64
+    container_name: ${CRYPTOARM_CONTAINER_NAME:-kryptoarm-diadoc-cryptoarm-server}
+    restart: unless-stopped
+    # tini as PID 1: forwards SIGTERM to the server and reaps certmgr/cpconfig children.
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem (I6). Writable: the bind mount of the CSP store (keys) and these
+    # tmpfs (lost on every restart; start.sh refills them). Found with `docker diff` on a running stand.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777 # os.tmpdir(): temporary PFX files of /cms/sign with a .pfx cert
+      - /var/lib/cryptoarm-server:size=16m,mode=0700 # cash.json (PKI store cache, symlinked from /)
+      - /etc/opt/Trusted:size=1m,mode=0700 # license.lic, written by start.sh
+      - /etc/opt/cprocsp:size=16m,mode=0755 # CSP config incl. license.ini, seeded by start.sh
+      - /var/cache/fontconfig:size=16m,mode=0755 # font cache of the PDF reports
+    # Resource limits (I6); tmpfs contents count towards the memory limit.
+    cpus: ${CRYPTOARM_SERVER_CPUS:-2}
+    mem_limit: ${CRYPTOARM_SERVER_MEMORY:-2g}
+    pids_limit: ${CRYPTOARM_SERVER_PIDS:-256}
+    ports:
+      # Loopback only: the service signs with the keys installed in the container.
+      - '127.0.0.1:${CRYPTOARM_SERVER_PORT:-3037}:3037'
+    # Non-secret settings only; secrets go into ./secrets (see .env.example, README.md).
+    env_file:
+      - .env
+    volumes:
+      - ./cert_storage:/var/opt/cprocsp/
+      - ./certs:/certs:ro
+      # Licenses, API keys, PFX containers + PINs as files, read by start.sh.
+      - type: bind
+        source: ./secrets
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # /health/memory is excluded from API key auth upstream. The config64.ini check catches an image
+      # older than this file (I6): its start.sh does not seed the tmpfs /etc/opt/cprocsp, so CSP cannot
+      # sign although the API answers.
+      test:
+        - CMD-SHELL
+        - test -s /etc/opt/cprocsp/config64.ini && curl -fsS -o /dev/null http://127.0.0.1:3037/health/memory
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Build-only service: tags the image `cryptoarm-server` runs. The profile keeps it out of `up`/`run`;
+  # never start it (`--profile build up` would run a second, unconfigured server that exits).
+  cryptoarm-server-image:
+    profiles: [build]
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
+    image: ${CRYPTOARM_SERVER_IMAGE:-kryptoarm-diadoc/cryptoarm-server:stand-i6}

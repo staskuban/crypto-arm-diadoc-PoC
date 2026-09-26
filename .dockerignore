@@ -1,0 +1,12 @@
+# Allowlist: the build needs only the manifests, the TS configs and src. Everything else stays out of the
+# context, in particular .env files, node_modules, spikes and docker/cryptoarm-server/{.env,certs,
+# cert_storage,cryptopro} (keys, licenses, the CSP distribution).
+*
+!package.json
+!package-lock.json
+!.npmrc
+!tsconfig.json
+!tsconfig.build.json
+!src/
+src/**/*.test.ts
+src/**/fixtures/
