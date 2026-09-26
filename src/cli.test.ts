@@ -300,15 +300,20 @@ describe('cli', () => {
     );
   });
 
-  it('passes GetMessage and GetSignatureInfo through to the Diadoc client', async () => {
+  it('passes GetMessage, GetSignatureInfo and GetOrganization through to the Diadoc client', async () => {
     const seen: string[] = [];
     const { deps } = setup(async (_input, d) => {
+      await d.diadoc.getOrganization('b');
       await d.diadoc.getMessage('b', 'm');
       await d.diadoc.getSignatureInfo({ boxId: 'b', messageId: 'm', entityId: 's' });
       return RESULT;
     });
     deps.createDiadoc = () =>
       Promise.resolve({
+        getOrganization: () => {
+          seen.push('getOrganization');
+          return Promise.resolve({ IsTest: true });
+        },
         getMessage: () => {
           seen.push('getMessage');
           return Promise.resolve({ MessageId: 'm' });
@@ -319,7 +324,7 @@ describe('cli', () => {
         },
       } as unknown as PipelineDiadoc);
     expect(await main(['send', '/data/f.xml'], deps)).toBe(EXIT.ok);
-    expect(seen).toEqual(['getMessage', 'getSignatureInfo']);
+    expect(seen).toEqual(['getOrganization', 'getMessage', 'getSignatureInfo']);
   });
 
   it('exits 1 with the pipeline code on stderr', async () => {
@@ -383,7 +388,7 @@ describe('cli', () => {
     [{ SIGNER_KIND: 'documents' }, /^error \[SIGNER_CONFIG\] DOCUMENTS_URL is not set/],
     [
       { SIGNER_KIND: 'hsm' },
-      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server" or "documents"/,
+      /^error \[SIGNER_CONFIG\] SIGNER_KIND must be "server", "documents" or "diadoc-test"/,
     ],
   ])('default signer factory honours SIGNER_KIND %j', async (extra, message) => {
     const { deps, err } = setup(undefined, { ...ENV, ...extra });
@@ -391,6 +396,22 @@ describe('cli', () => {
     delete rest.createSigner;
     expect(await main(['send', '/data/f.xml'], rest)).toBe(EXIT.failed);
     expect(err.join('')).toMatch(message);
+  });
+
+  it('SIGNER_KIND=diadoc-test passes the Diadoc test signature without any signer env', async () => {
+    const signers: unknown[] = [];
+    const { deps, out } = setup(
+      (_input, d) => {
+        signers.push(d.signer);
+        return Promise.resolve({ ...RESULT, testSignature: true });
+      },
+      { ...ENV, SIGNER_KIND: 'diadoc-test' },
+    );
+    const rest: CliDeps = { ...deps };
+    delete rest.createSigner;
+    expect(await main(['send', '/data/f.xml'], rest)).toBe(EXIT.ok);
+    expect(signers).toEqual(['diadoc-test']);
+    expect(JSON.parse(out.join(''))).toMatchObject({ testSignature: true });
   });
 
   it('default signer factory refuses a bad certificate and plain http at start (F13)', async () => {

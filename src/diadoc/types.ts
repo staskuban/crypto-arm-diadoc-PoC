@@ -16,6 +16,8 @@ export interface Organization {
   ShortName?: string;
   /** Participant id from the УПД file name (ИдОтпр / ИдПол). */
   FnsParticipantId?: string;
+  /** A test organisation (quickstart boxes, D191): only these may get `SignWithTestSignature`. */
+  IsTest?: boolean;
   Boxes?: Box[];
   [key: string]: unknown;
 }
@@ -88,7 +90,10 @@ export interface MessageValidationResult {
 export type SignedContentBody =
   { Content: Buffer; NameOnShelf?: never } | { NameOnShelf: string; Content?: never };
 
-/** Detached CMS SignedData (DER), or Diadoc's `SignWithTestSignature` (test boxes only). */
+/**
+ * Detached CMS SignedData (DER), or Diadoc's `SignWithTestSignature` (test boxes only). The client
+ * does not check the boxes: `sendUtd` refuses the test signature unless both are `IsTest` (D224).
+ */
 export type SignedContentSignature =
   | { Signature: Buffer; SignWithTestSignature?: never }
   | { SignWithTestSignature: true; Signature?: never };

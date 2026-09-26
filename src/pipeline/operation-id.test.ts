@@ -23,6 +23,7 @@ describe('operationIdFor', () => {
     ['a customDocumentId', { customDocumentId: 'inv-42' }],
     ['an empty customDocumentId', { customDocumentId: '' }],
     ['a resend salt', { resend: 'r1' }],
+    ['the Diadoc test signature', { testSignature: true }],
   ])('changes with %s', (_name, change) => {
     expect(operationIdFor({ ...KEY, ...change })).not.toBe(operationIdFor(KEY));
   });
@@ -55,6 +56,16 @@ describe('operationIdFor', () => {
     );
     expect(operationIdFor({ ...KEY, customDocumentId: 'inv-42', resend: 'r1' })).toBe(
       'b902b35d96a4fb6b098808caf0e79616f4f96fb84b5b16c5bfcafd957552e87a',
+    );
+  });
+
+  it('adds the test-signature marker only when set (the golden values above stay)', () => {
+    expect(operationIdFor({ ...KEY, testSignature: false })).toBe(operationIdFor(KEY));
+    expect(operationIdFor({ ...KEY, testSignature: true })).toBe(
+      operationIdFor({ ...KEY, testSignature: true }),
+    );
+    expect(operationIdFor({ ...KEY, testSignature: true, resend: 'r1' })).not.toBe(
+      operationIdFor({ ...KEY, resend: 'r1' }),
     );
   });
 

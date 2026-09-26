@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createSignerFromEnv,
+  signerKind,
   loadDocumentsCloudSignerEnv,
   loadServerCmsSignerOptions,
 } from './config.js';
@@ -245,8 +246,27 @@ describe('createSignerFromEnv', () => {
 
   it('rejects an unknown SIGNER_KIND', async () => {
     await expect(createSignerFromEnv({ ...server, SIGNER_KIND: 'dss' }, readFile)).rejects.toThrow(
-      /SIGNER_KIND must be "server" or "documents", got "dss"/,
+      /SIGNER_KIND must be "server", "documents" or "diadoc-test", got "dss"/,
     );
+  });
+
+  it('builds no signer for SIGNER_KIND=diadoc-test (the pipeline posts the Diadoc test signature)', async () => {
+    await expect(
+      createSignerFromEnv({ ...server, SIGNER_KIND: 'diadoc-test' }, readFile),
+    ).rejects.toThrow(/SIGNER_KIND=diadoc-test has no signer/);
+  });
+
+  it.each<[string | undefined, string]>([
+    [undefined, 'server'],
+    ['', 'server'],
+    ['documents', 'documents'],
+    ['diadoc-test', 'diadoc-test'],
+  ])('signerKind(%j) = %s', (kind, expected) => {
+    expect(signerKind({ SIGNER_KIND: kind })).toBe(expected);
+  });
+
+  it('signerKind rejects an unknown kind', () => {
+    expect(() => signerKind({ SIGNER_KIND: 'Server' })).toThrow(SignerConfigError);
   });
 });
 

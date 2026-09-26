@@ -27,6 +27,11 @@ export type PipelineErrorCode =
   | 'SIGNATURE_POLICY_VIOLATION'
   /** The signer returned something that is not a DER CMS SignedData. */
   | 'INVALID_SIGNATURE'
+  /**
+   * The Diadoc test signature (SIGNER_KIND=diadoc-test) was asked for, but a box is not a test
+   * organisation (`GetOrganization` → `IsTest`). Nothing was uploaded or posted.
+   */
+  | 'TEST_SIGNATURE_REFUSED'
   /** CanPostMessage reported blocking errors (`details`). */
   | 'PRECHECK_REJECTED'
   | 'PRECHECK_FAILED'

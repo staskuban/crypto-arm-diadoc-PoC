@@ -37,6 +37,17 @@ describe('toDocumentAttachment', () => {
     expect(() => toDocumentAttachment(attachment, 'dd-1')).toThrow(/must not/);
   });
 
+  it('maps the Diadoc test signature to SignWithTestSignature (inline and shelf)', () => {
+    const test = { ...attachment, signature: 'diadoc-test' } as const;
+    expect(toDocumentAttachment(test).SignedContent).toEqual({
+      Content: attachment.content,
+      SignWithTestSignature: true,
+    });
+    expect(
+      toDocumentAttachment({ ...test, contentPlacement: 'shelf' }, 'dd-1').SignedContent,
+    ).toEqual({ NameOnShelf: 'dd-1', SignWithTestSignature: true });
+  });
+
   it('builds the CanPostMessage prototype', () => {
     expect(toMessagePrototype('a', 'b', attachment)).toEqual({
       FromBoxId: 'a',

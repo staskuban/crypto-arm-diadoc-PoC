@@ -178,8 +178,9 @@ export class DiadocClient {
     return this.getJson('/GetMyOrganizations', { autoRegister: 'false' });
   }
 
-  getOrganization(boxId: string): Promise<Organization> {
-    return this.getJson('/GetOrganization', { boxId });
+  /** `IsTest` tells the test organisations (quickstart boxes) from real ones. */
+  getOrganization(boxId: string, o: RequestOptions = {}): Promise<Organization> {
+    return this.getJson('/GetOrganization', { boxId }, o);
   }
 
   getDocumentTypes(boxId: string): Promise<DocumentTypesResponse> {
@@ -356,6 +357,18 @@ export class DiadocClient {
   /** V5/GetMessage without entity content: the entities (signatures, notifications) of a message. */
   getMessage(boxId: string, messageId: string, o: RequestOptions = {}): Promise<Message> {
     return this.getJson('/V5/GetMessage', { boxId, messageId, injectEntityContent: 'false' }, o);
+  }
+
+  /** The raw bytes of an entity (e.g. the document content as Diadoc stored it). */
+  async getEntityContent(ref: DocumentRef, o: RequestOptions = {}): Promise<Buffer> {
+    const res = await this.send(
+      'GET',
+      '/V4/GetEntityContent',
+      { boxId: ref.boxId, messageId: ref.messageId, entityId: ref.entityId },
+      undefined,
+      o,
+    );
+    return Buffer.from(await res.arrayBuffer());
   }
 
   /** How Diadoc verified a signature entity (`ref.entityId` is the Signature entity). */

@@ -1,6 +1,11 @@
 // Maps the УПД domain attachment (src/utd, camelCase + Buffers) to the Diadoc wire types (docs/plan.md D2).
-import type { DocumentAttachment, DocumentPrototype, MessagePrototype } from '../diadoc/index.js';
-import type { UtdAttachmentInput } from '../utd/index.js';
+import type {
+  DocumentAttachment,
+  DocumentPrototype,
+  MessagePrototype,
+  SignedContentSignature,
+} from '../diadoc/index.js';
+import { DIADOC_TEST_SIGNATURE, type UtdAttachmentInput } from '../utd/index.js';
 
 /** `nameOnShelf` is required for, and only allowed with, `contentPlacement: 'shelf'`. */
 export function toDocumentAttachment(
@@ -13,14 +18,18 @@ export function toDocumentAttachment(
         (nameOnShelf === undefined ? 'needs a NameOnShelf' : 'must not have a NameOnShelf'),
     );
   }
+  const signature: SignedContentSignature =
+    a.signature === DIADOC_TEST_SIGNATURE
+      ? { SignWithTestSignature: true }
+      : { Signature: a.signature };
   return {
     TypeNamedId: a.typeNamedId,
     Function: a.function,
     Version: a.version,
     SignedContent:
       nameOnShelf === undefined
-        ? { Content: a.content, Signature: a.signature }
-        : { NameOnShelf: nameOnShelf, Signature: a.signature },
+        ? { Content: a.content, ...signature }
+        : { NameOnShelf: nameOnShelf, ...signature },
     ...(a.customDocumentId === undefined ? {} : { CustomDocumentId: a.customDocumentId }),
   };
 }

@@ -30,5 +30,7 @@ export {
   createSignerFromEnv,
   loadDocumentsCloudSignerEnv,
   loadServerCmsSignerOptions,
+  signerKind,
   type SignerEnv,
+  type SignerKind,
 } from './config.js';

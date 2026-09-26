@@ -152,6 +152,41 @@ describe('DiadocClient requests', () => {
     expect(calls[0]?.url.searchParams.get('boxId')).toBe('box-guid');
   });
 
+  it('GetOrganization honours the abort signal', async () => {
+    const { client, calls } = makeClient([jsonResponse({ IsTest: true })]);
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    await expect(client.getOrganization('box-guid', { signal: controller.signal })).rejects.toThrow(
+      'stop',
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('V4/GetEntityContent returns the raw bytes', async () => {
+    const bytes = Buffer.from([0xcf, 0xf0, 0xe8, 0x00, 0xff]);
+    const { client, calls } = makeClient([new Response(bytes, { status: 200 })]);
+    const content = await client.getEntityContent({
+      boxId: 'box',
+      messageId: 'msg',
+      entityId: 'ent',
+    });
+    expect(content.equals(bytes)).toBe(true);
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.url.pathname).toBe('/V4/GetEntityContent');
+    expect(Object.fromEntries(calls[0]?.url.searchParams ?? [])).toEqual({
+      boxId: 'box',
+      messageId: 'msg',
+      entityId: 'ent',
+    });
+  });
+
+  it('V4/GetEntityContent: a 404 is a DiadocError', async () => {
+    const { client } = makeClient([new Response('Entity not found', { status: 404 })]);
+    await expect(
+      client.getEntityContent({ boxId: 'b', messageId: 'm', entityId: 'e' }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   it('V3/GetDocumentTypes by boxId', async () => {
     const types = { DocumentTypes: [{ Name: 'UniversalTransferDocument', Functions: [] }] };
     const { client, calls } = makeClient([jsonResponse(types)]);
