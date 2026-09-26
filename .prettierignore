@@ -5,3 +5,4 @@ package-lock.json
 docs/
 CLAUDE.md
 spikes/
+.claude/
