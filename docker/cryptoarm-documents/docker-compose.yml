@@ -5,6 +5,7 @@
 #   scripts/documents-secrets.sh                      # once: fills ./secrets (git-ignored)
 #   docker compose -p kryptoarm-diadoc-i2 -f docker/cryptoarm-documents/docker-compose.yml up -d --wait
 #   scripts/smoke-documents.sh                        # upload -> cloud-sign -> export -> verify
+#   open http://127.0.0.1:3041/                       # web UI (documents-app), local login as admin
 #
 # This file never starts, builds or recreates the КриптоАРМ Server: it only joins the server's
 # compose network (SIGN_SERVICE_NETWORK) and calls it by container name (SIGN_SERVICE_URL).
@@ -160,6 +161,43 @@ services:
     volumes:
       - ./ca-stub/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${SIGNER_CERTS_DIR:-../cryptoarm-server/certs}:/certs:ro
+
+  # Web UI (I7): the SPA of registry.digtlab.ru/trusted/cryptoarm/documents/app (nginx + static
+  # files) with app/nginx.conf, which also proxies /api to documents-api: the SPA only uses
+  # relative /api URLs with the session cookie, so UI and API must share one origin. Local login
+  # (/#/localLogin) as the admin of ./secrets/admin_password; see README.md.
+  documents-app:
+    image: ${DOCUMENTS_APP_IMAGE:-registry.digtlab.ru/trusted/cryptoarm/documents/app:1.0.209@sha256:3ddfa544626e13206b4b03a2ca2b168dce6a8f1dff98296a00a71ad6abf2696f}
+    platform: linux/amd64
+    restart: unless-stopped
+    # As the image's nginx user (port 8080 needs no privilege; the `user` directive of the image's
+    # nginx.conf is then ignored with a warning), like ca-stub.
+    user: '101:101'
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m,uid=101,gid=101 # proxy/client body temp files
+      - /run:size=1m,uid=101,gid=101 # nginx.pid
+    cpus: ${DOCUMENTS_APP_CPUS:-0.25}
+    mem_limit: ${DOCUMENTS_APP_MEMORY:-64m}
+    pids_limit: ${DOCUMENTS_APP_PIDS:-32}
+    ports:
+      # Loopback only: the same API (and its login) as on DOCUMENTS_API_PORT.
+      - '127.0.0.1:${DOCUMENTS_APP_PORT:-3041}:8080'
+    volumes:
+      - ./app/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [default]
+    depends_on:
+      documents-api:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8080/']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   documents-uploads:
