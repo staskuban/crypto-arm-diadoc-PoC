@@ -65,7 +65,8 @@ has_tmpfs() {
 }
 
 # Every service of both stands: read-only rootfs and limits.
-for pair in server.json:cryptoarm-server documents.json:documents-api documents.json:documents-db documents.json:ca-stub; do
+for pair in server.json:cryptoarm-server documents.json:documents-api documents.json:documents-db documents.json:ca-stub \
+  documents.json:documents-app; do
   json="$work/${pair%%:*}" svc="${pair#*:}"
   check "$svc: read_only root filesystem" eq "$(q "$json" ".services[\"$svc\"].read_only")" true
   check "$svc: CPU limit set" bash -c "[ \"\$(jq -r '.services[\"$svc\"].cpus // empty' '$json')\" != '' ]"
@@ -105,8 +106,8 @@ check "documents-db: tmpfs /tmp" has_tmpfs "$d" documents-db /tmp
 check "ca-stub: tmpfs /var/cache/nginx" has_tmpfs "$d" ca-stub /var/cache/nginx
 check "ca-stub: tmpfs /run" has_tmpfs "$d" ca-stub /run
 check "documents: default limits" \
-  eq "$(q "$d" '[.services["documents-api","documents-db","ca-stub"] | "\(.cpus)/\(.mem_limit)/\(.pids_limit)"] | join(" ")')" \
-  "1/1073741824/256 1/536870912/128 0.25/67108864/32"
+  eq "$(q "$d" '[.services["documents-api","documents-db","ca-stub","documents-app"] | "\(.cpus)/\(.mem_limit)/\(.pids_limit)"] | join(" ")')" \
+  "1/1073741824/256 1/536870912/128 0.25/67108864/32 0.25/67108864/32"
 config "$documents_compose" "$work/documents-env.json" DOCUMENTS_API_CPUS=2 DOCUMENTS_API_MEMORY=2g DOCUMENTS_API_PIDS=512
 check "documents-api: limits overridable via env" \
   eq "$(q "$work/documents-env.json" '.services["documents-api"] | "\(.cpus) \(.mem_limit) \(.pids_limit)"')" "2 2147483648 512"
@@ -114,7 +115,7 @@ check "documents-api: limits overridable via env" \
 # F17 (R2 minor 23): capability drop, no-new-privileges and a non-root user for ca-stub and
 # documents-db (both images start as root only to switch users; as the image's own user they need no
 # capability), and every image pinned by digest.
-for svc in documents-api ca-stub documents-db; do
+for svc in documents-api ca-stub documents-db documents-app; do
   check "$svc: cap_drop ALL" eq "$(q "$d" ".services[\"$svc\"].cap_drop // [] | join(\",\")")" ALL
   check "$svc: no cap_add" eq "$(q "$d" ".services[\"$svc\"].cap_add // [] | length")" 0
   check "$svc: no-new-privileges" eq "$(q "$d" ".services[\"$svc\"].security_opt // [] | index(\"no-new-privileges:true\") != null")" true
@@ -124,10 +125,44 @@ check "documents-db: runs as the image's postgres user (uid of the data files an
 check "ca-stub: runs as the image's nginx user" eq "$(q "$d" '.services["ca-stub"].user')" 101:101
 check "ca-stub: tmpfs owned by the nginx user" \
   eq "$(q "$d" '[.services["ca-stub"].tmpfs[] | select(test("uid=101,gid=101"))] | length')" 2
-for svc in documents-api documents-db ca-stub; do
+for svc in documents-api documents-db ca-stub documents-app; do
   check "$svc: image pinned by digest" \
     bash -c "jq -r '.services[\"$svc\"].image' '$d' | grep -Eq '^[^@]+:[^@/]+@sha256:[0-9a-f]{64}\$'"
 done
+
+# I7: the web UI (nginx serving the SPA and proxying /api to documents-api, same origin).
+check "documents-app: tmpfs /var/cache/nginx" has_tmpfs "$d" documents-app /var/cache/nginx
+check "documents-app: tmpfs /run" has_tmpfs "$d" documents-app /run
+check "documents-app: runs as the image's nginx user" eq "$(q "$d" '.services["documents-app"].user')" 101:101
+check "documents-app: tmpfs owned by the nginx user" \
+  eq "$(q "$d" '[.services["documents-app"].tmpfs[] | select(test("uid=101,gid=101"))] | length')" 2
+check "documents-app: published on loopback only, default port 3041 -> 8080" \
+  eq "$(q "$d" '[.services["documents-app"].ports[] | "\(.host_ip) \(.published) \(.target)"] | join(",")')" "127.0.0.1 3041 8080"
+config "$documents_compose" "$work/documents-app-port.json" DOCUMENTS_APP_PORT=3051
+check "documents-app: port overridable via env" \
+  eq "$(q "$work/documents-app-port.json" '.services["documents-app"].ports[0].published')" 3051
+check "documents-app: nginx config mounted read-only over the image default" \
+  eq "$(q "$d" '.services["documents-app"].volumes[] | select(.target == "/etc/nginx/conf.d/default.conf") | .read_only')" true
+check "documents-app: not attached to the КриптоАРМ Server network" \
+  eq "$(q "$d" '.services["documents-app"].networks | keys | join(",")')" default
+app_conf="$repo/docker/cryptoarm-documents/app/nginx.conf"
+check "documents-app: listens on 8080 (no privilege needed)" grep -Eq '^[[:space:]]*listen[[:space:]]+8080;' "$app_conf"
+check "documents-app: proxies /api (same origin for the session cookie) to documents-api:3000" \
+  bash -c "grep -Fq 'location ~ ^/(api|' '$app_conf' && grep -Fq 'set \$documents_api http://documents-api:3000;' '$app_conf'"
+check "documents-app: proxy_pass is the bare variable (a URI part would replace every request path)" \
+  grep -Eq '^[[:space:]]*proxy_pass \$documents_api;' "$app_conf"
+check "documents-app: API name re-resolved via Docker DNS" grep -Eq '^[[:space:]]*resolver 127\.0\.0\.11 ' "$app_conf"
+check "documents-app: HTTP/1.1 upstream (else chunked bodies are buffered to disk, D230)" \
+  grep -Eq '^[[:space:]]*proxy_http_version 1\.1;' "$app_conf"
+check "documents-app: API sees host:port (no proxy_redirect with a variable proxy_pass)" \
+  grep -Eq '^[[:space:]]*proxy_set_header Host \$http_host;' "$app_conf"
+check "documents-app: healthcheck set" bash -c "[ \"\$(jq -r '.services[\"documents-app\"].healthcheck.test | length' '$d')\" -gt 0 ]"
+check "documents-app: starts after documents-api" \
+  eq "$(q "$d" '.services["documents-app"].depends_on | keys | join(",")')" documents-api
+check "documents-app: body limit just above MAX_FILE_SIZE (50 MiB) of the API, which answers at the limit" \
+  bash -c "grep -Eq '^[[:space:]]*client_max_body_size[[:space:]]+51m;' '$app_conf' && [ \"\$(jq -r '.services[\"documents-api\"].environment.MAX_FILE_SIZE' '$d')\" = 50 ]"
+check "documents-app: no proxy temp files on the small read-only tmpfs (D230)" \
+  bash -c "grep -Eq '^[[:space:]]*proxy_request_buffering[[:space:]]+off;' '$app_conf' && grep -Eq '^[[:space:]]*proxy_max_temp_file_size[[:space:]]+0;' '$app_conf'"
 
 # F17 (R2 minor 24): the app service and its image.
 a="$work/root.json"
