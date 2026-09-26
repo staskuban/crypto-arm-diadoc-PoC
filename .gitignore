@@ -1,0 +1,42 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+# Diadoc refresh token persisted by the CLI (DIADOC_REFRESH_TOKEN_FILE) and its temp file
+.diadoc-refresh-token*
+.documents-jwt*
+*.pfx
+*.p12
+
+# КриптоАРМ Server: human-downloaded CSP distribution, CSP key store, fetched test certs
+cryptopro/*.tgz
+docker/cryptoarm-server/cryptopro/*
+!docker/cryptoarm-server/cryptopro/.gitkeep
+docker/cryptoarm-server/cert_storage/
+docker/cryptoarm-server/secrets/*
+!docker/cryptoarm-server/secrets/.gitkeep
+docker/cryptoarm-server/certs/**/*.cer
+
+# КриптоАРМ Документы stand: licence, API keys, generated passwords
+docker/cryptoarm-documents/secrets/*
+!docker/cryptoarm-documents/secrets/.gitkeep
+
+# Other key/cert material and КриптоПро key containers
+*.key
+*.pem
+*.crt
+*.der
+*.p7b
+*.000/
+*.tmp
+# Public test data (CMS of fixture bytes, no keys)
+!src/asn1/fixtures/*.der
+
+# УПД files mounted into the app container (UTD_DIR default); real documents carry business data
+/utd/

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UniversalTransferDocument Function="СЧФДОП" DocumentDate="25.09.2026" DocumentNumber="S1-GEN-1" Currency="643">
+  <Sellers><Seller><OrganizationDetails OrgType="2" OrgName="Тестовая организация №2031675" Inn="9620316755" Kpp="962001000" FnsParticipantId="2BM-9620316755-962001000-202609250245017009189"><Address><RussianAddress Region="77"/></Address></OrganizationDetails></Seller></Sellers>
+  <Buyers><Buyer><OrganizationDetails OrgType="2" OrgName="Тестовая организация №5999872" Inn="9659998725" Kpp="965901000" FnsParticipantId="2BM-9659998725-965901000-202609250235309299170"><Address><RussianAddress Region="77"/></Address></OrganizationDetails></Buyer></Buyers>
+  <Signers><Signer SignerPowersConfirmationMethod="1"><Fio LastName="Тестов" FirstName="Тест"/><Position PositionSource="Manual">Директор</Position></Signer></Signers>
+  <Table TotalWithVatExcluded="100.00" Vat="22.00" Total="122.00">
+    <Item Product="Тестовый товар" Unit="796" UnitName="шт" Quantity="1" Price="100.00" SubtotalWithVatExcluded="100.00" TaxRate="TwentyTwoPercent" Vat="22.00" Subtotal="122.00"/>
+  </Table>
+  <TransferInfo OperationInfo="Товары переданы" TransferDate="25.09.2026"/>
+</UniversalTransferDocument>

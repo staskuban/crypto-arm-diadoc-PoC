@@ -1,0 +1,6 @@
+# Build context needs only the Dockerfile, the CSP distribution (bind-mounted into one RUN, never
+# copied into a layer) and the entrypoint.
+*
+!Dockerfile
+!cryptopro/linux-amd64_deb.tgz
+!start.sh

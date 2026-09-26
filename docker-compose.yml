@@ -1,0 +1,67 @@
+# Local/test environment. Service definitions live next to their Dockerfiles
+# and are pulled in via `include`. Needs Compose >= 2.24 (optional `env_file`).
+#
+include:
+  - path: docker/cryptoarm-server/docker-compose.yml
+
+services:
+  # One-shot CLI, not a daemon: the profile keeps it out of `docker compose up`.
+  #   docker compose build app
+  #   docker compose run --rm --no-deps app send <ИдФайл>.xml     # file from ${UTD_DIR:-./utd}
+  # (`run` reuses an existing image: after changes in src run `build app` or pass `--build`, which
+  # builds only the app: cryptoarm-server has no build section and `pull_policy: never`, D8.)
+  # APP_IMAGE overrides the tag, e.g. for a throwaway stand next to the shared one.
+  app:
+    profiles: [app]
+    build:
+      context: .
+    image: ${APP_IMAGE:-kryptoarm-diadoc/app:local}
+    init: true
+    # F17 (R2 minor 24): the container holds the Диадок client secret and refresh token (env_file).
+    # It runs as `node` and writes only the refresh-token volume, so: no capabilities, no setuid
+    # escalation, read-only root filesystem (+ a small /tmp as a margin: src/ writes no temp files).
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # The first SIGTERM (`docker stop`, CI cancel) lets a running PostMessage finish: it ends within
+    # POST_MESSAGE_BUDGET_MS (180 s, src/diadoc/client.ts); the rest is margin to print the ids and
+    # remove the refresh-token lock. A SIGKILL before that loses both (R2 M2). Checked by src/cli.test.ts.
+    stop_grace_period: 200s
+    depends_on:
+      cryptoarm-server:
+        condition: service_healthy
+    # App settings from the root .env (same file `npm run cli` reads); the host-side paths in it are
+    # overridden below with their in-container counterparts.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CRYPTOARM_SERVER_URL: http://cryptoarm-server:3037
+      SIGNER_CERT_PATH: /run/app/signer.cer
+      DIADOC_REFRESH_TOKEN_FILE: /var/lib/app/diadoc/refresh-token
+    volumes:
+      # Public certificate only; the private key stays in the КриптоАРМ Server store.
+      - type: bind
+        source: ${SIGNER_CERT_PATH:-./docker/cryptoarm-server/certs/cryptoarm.server.test.cer}
+        target: /run/app/signer.cer
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UTD_DIR:-./utd}
+        target: /work
+        read_only: true
+        bind:
+          create_host_path: false
+      # Writable: the CLI writes rotated refresh tokens back (write + rename in this directory).
+      - diadoc-token:/var/lib/app/diadoc
+
+volumes:
+  # The only copy of a rotating refresh token: external with a fixed name, so `down -v` never deletes
+  # it and every worktree/compose project uses the same one. Create and seed it as in .env.example.
+  diadoc-token:
+    name: kryptoarm-diadoc-diadoc-token
+    external: true

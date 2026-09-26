@@ -1,0 +1,2 @@
+# Fixtures are exact byte sequences (windows-1251): never normalise line endings or encoding.
+* -text
