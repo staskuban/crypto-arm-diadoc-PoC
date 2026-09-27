@@ -61,19 +61,24 @@ describe('buildTestUtd', () => {
     expect(text).toContain('КодРегион="77"');
   });
 
-  it.each([500_100, 6_500_000])('pads with goods rows to at least %i bytes', (minBytes) => {
-    const utd = buildTestUtd({ ...PARAMS, minBytes });
-    expect(utd.content.length).toBeGreaterThanOrEqual(minBytes);
-    expect(utd.content.length).toBeLessThan(minBytes + 1_000);
-    const text = new TextDecoder('windows-1251').decode(utd.content);
-    const rows = text.match(/<СведТов /g)?.length ?? 0;
-    expect(rows).toBeGreaterThan(1);
-    expect(text).toContain(
-      `<ВсегоОпл СтТовБезНДСВсего="${String(rows * 100)}.00" ` +
-        `СтТовУчНалВсего="${String(rows * 122)}.00">`,
-    );
-    expect(parseUtd(utd).function).toBe('СЧФДОП');
-  });
+  it.each([500_100, 6_500_000])(
+    'pads with goods rows to at least %i bytes',
+    (minBytes) => {
+      const utd = buildTestUtd({ ...PARAMS, minBytes });
+      expect(utd.content.length).toBeGreaterThanOrEqual(minBytes);
+      expect(utd.content.length).toBeLessThan(minBytes + 1_000);
+      const text = new TextDecoder('windows-1251').decode(utd.content);
+      const rows = text.match(/<СведТов /g)?.length ?? 0;
+      expect(rows).toBeGreaterThan(1);
+      expect(text).toContain(
+        `<ВсегоОпл СтТовБезНДСВсего="${String(rows * 100)}.00" ` +
+          `СтТовУчНалВсего="${String(rows * 122)}.00">`,
+      );
+      expect(parseUtd(utd).function).toBe('СЧФДОП');
+      // The 6.5 MB case takes 3–7 s (binary search over row counts); the default 5 s was flaky.
+    },
+    30_000,
+  );
 
   it.skipIf(!xmllint)('validates against the ФНС XSD 5.03 (xmllint), one row and many', () => {
     for (const minBytes of [undefined, 20_000]) {

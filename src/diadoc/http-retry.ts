@@ -1,4 +1,4 @@
-// One bounded retry loop for every Diadoc API and IdP request, also used by DocumentsCloudSigner:
+// One bounded retry loop for every Diadoc API and IdP request:
 // a transient status (408/429/500/502/503/504) honours its Retry-After when it has one, otherwise
 // (and after network errors/timeouts) the pause backs off exponentially. The caller repeats the
 // identical request.
