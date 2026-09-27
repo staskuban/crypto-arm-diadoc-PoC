@@ -55,6 +55,13 @@ export function partyFromOrganization(
   };
 }
 
+/**
+ * Largest `minBytes`: enough for the КриптоАРМ Server signing limit (≈ 39.3 MB, T10). The builder keeps
+ * the whole УПД as a string (UTF-16) plus the goods rows and searches the row count, so far larger
+ * sizes would exhaust memory rather than make a useful test file (F23).
+ */
+export const MAX_TEST_UTD_BYTES = 40_000_000;
+
 /** A box of `makeTestUtd` is not a test organisation: nothing was built. */
 export class TestUtdRefusedError extends Error {
   override readonly name = 'TestUtdRefusedError';
@@ -81,13 +88,22 @@ export async function makeTestUtd(
   diadoc: { getOrganization(boxId: string, o?: RequestOptions): Promise<Organization> },
   options: MakeTestUtdOptions,
 ): Promise<MadeTestUtd> {
-  const o = options.signal === undefined ? {} : { signal: options.signal };
+  checkMinBytes(options.minBytes);
+  const { signal } = options;
+  const o = signal === undefined ? {} : { signal };
   const parties: Party[] = [];
   for (const [role, boxId] of [
     ['sender', options.fromBoxId],
     ['recipient', options.toBoxId],
   ] as const) {
-    const org = await diadoc.getOrganization(boxId, o);
+    signal?.throwIfAborted();
+    let org: Organization;
+    try {
+      org = await diadoc.getOrganization(boxId, o);
+    } catch (error) {
+      // An aborted fetch or retry pause rejects with its own AbortError, not the signal's reason.
+      throw signal?.aborted ? signal.reason : error;
+    }
     if (org.IsTest !== true) {
       throw new TestUtdRefusedError(
         `test УПД are only for test boxes, but the ${role} box ${boxId} ` +
@@ -108,7 +124,16 @@ export async function makeTestUtd(
   return { ...utd, seller, buyer };
 }
 
+function checkMinBytes(minBytes: number | undefined): void {
+  if (minBytes !== undefined && minBytes > MAX_TEST_UTD_BYTES) {
+    throw new RangeError(
+      `minBytes ${String(minBytes)} is above ${String(MAX_TEST_UTD_BYTES)} (MAX_TEST_UTD_BYTES)`,
+    );
+  }
+}
+
 export function buildTestUtd(p: TestUtdParams): TestUtd {
+  checkMinBytes(p.minBytes);
   const idFile =
     `ON_NSCHFDOPPR_${p.buyer.fnsParticipantId}_${p.seller.fnsParticipantId}_` +
     `${yyyymmdd(p.date)}_${p.guid}_0_0_0_0_0_00`;

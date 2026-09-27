@@ -26,6 +26,7 @@ import {
 } from './diadoc/index.js';
 import {
   describeSignatureCheck,
+  isAuthFailure,
   isResendSalt,
   isSignatureRejected,
   loadPipelineConfig,
@@ -36,7 +37,12 @@ import {
 } from './pipeline/index.js';
 import { createSignerFromEnv, signerKind, type Signer } from './signer/index.js';
 import { DIADOC_TEST_SIGNATURE } from './utd/index.js';
-import { makeTestUtd, TestUtdRefusedError, type Party } from './utd/test-utd.js';
+import {
+  makeTestUtd,
+  MAX_TEST_UTD_BYTES,
+  TestUtdRefusedError,
+  type Party,
+} from './utd/test-utd.js';
 
 export type CliEnv = Record<string, string | undefined>;
 
@@ -112,9 +118,9 @@ The first Ctrl+C/SIGTERM stops after the current step (a running PostMessage end
 budget); a second one exits at once (130/143), printing the operationId known so far.
 
 make-test-utd writes a test УПД (СЧФДОП 5.03, windows-1251) from DIADOC_FROM_BOX_ID (seller) to
-DIADOC_TO_BOX_ID (buyer), with their details from GetOrganization, into <dir> (default ./utd) as
-<ИдФайл>.xml and prints its path as JSON. Test boxes (IsTest) only; --min-bytes pads it with goods rows.
-Exit codes: 0 written, 1 failed, 2 usage.
+DIADOC_TO_BOX_ID (buyer), with their details from GetOrganization, into <dir> (default UTD_DIR or ./utd) as
+<ИдФайл>.xml and prints its path as JSON. Test boxes (IsTest) only; --min-bytes pads it with goods rows
+(at most ${String(MAX_TEST_UTD_BYTES)}). Exit codes: 0 written, 1 failed, 2 usage.
 `;
 
 export async function main(argv: readonly string[], deps: CliDeps): Promise<number> {
@@ -232,21 +238,24 @@ const MIN_BYTES = /^(0|[1-9][0-9]*)$/;
 async function makeTestUtdCommand(args: readonly string[], deps: CliDeps): Promise<number> {
   const outs = args.filter((a) => a.startsWith('--out='));
   const sizes = args.filter((a) => a.startsWith('--min-bytes='));
-  const [out = '--out=utd'] = outs;
+  const [out] = outs;
   const [size] = sizes;
-  const dir = out.slice('--out='.length);
+  // UTD_DIR is also the directory the app container mounts, so `send` there finds the file.
+  const utdDir = deps.env.UTD_DIR;
+  const defaultDir = utdDir === undefined || utdDir === '' ? 'utd' : utdDir;
+  const dir = out === undefined ? defaultDir : out.slice('--out='.length);
   const minText = size?.slice('--min-bytes='.length);
-  const minBytes = minText === undefined ? undefined : Number(minText);
   if (
     args.length !== outs.length + sizes.length ||
     outs.length > 1 ||
     sizes.length > 1 ||
     dir === '' ||
-    (minText !== undefined && (!MIN_BYTES.test(minText) || Number(minText) > SHELF_MAX_BYTES))
+    (minText !== undefined && (!MIN_BYTES.test(minText) || Number(minText) > MAX_TEST_UTD_BYTES))
   ) {
     deps.stderr(USAGE);
     return EXIT.usage;
   }
+  const minBytes = minText === undefined ? undefined : Number(minText);
 
   let diadoc: CliDiadoc | undefined;
   try {
@@ -254,23 +263,21 @@ async function makeTestUtdCommand(args: readonly string[], deps: CliDeps): Promi
     diadoc = await setupStep('DIADOC_CONFIG', () =>
       (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr, deps.state ?? {}),
     );
-    const lookup = diadoc;
-    const utd = await (async () => {
-      try {
-        return await makeTestUtd(lookup, {
+    const utd = await lookupStep(
+      deps.signal,
+      (lookup) =>
+        makeTestUtd(lookup, {
           fromBoxId: config.fromBoxId,
           toBoxId: config.toBoxId,
           date: (deps.now ?? (() => new Date()))(),
           guid: (deps.uuid ?? randomUUID)(),
           ...(minBytes === undefined ? {} : { minBytes }),
           ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-        });
-      } catch (error) {
-        if (error instanceof TestUtdRefusedError) throw error;
-        if (deps.signal?.aborted === true && error === deps.signal.reason) throw error;
-        throw new CliSetupError('TEST_UTD_FAILED', { cause: error });
-      }
-    })();
+        }),
+      diadoc,
+    );
+    // A first Ctrl+C during the (synchronous) build still leaves no file behind.
+    deps.signal?.throwIfAborted();
     const path = join(dir, utd.fileName);
     await setupStep('WRITE_FAILED', async () => {
       await (deps.mkdir ?? ((d) => fsMkdir(d, { recursive: true }).then(() => undefined)))(dir);
@@ -290,7 +297,9 @@ async function makeTestUtdCommand(args: readonly string[], deps: CliDeps): Promi
         2,
       )}\n`,
     );
-    deps.stderr(`test УПД written; sign and send it with: npm run cli -- send ${path}\n`);
+    deps.stderr(
+      `test УПД written; sign and send it with: npm run cli -- send ${shellQuote(path)}\n`,
+    );
     return EXIT.ok;
   } catch (error) {
     const interrupted = deps.signal?.aborted === true && error === deps.signal.reason;
@@ -309,6 +318,31 @@ async function makeTestUtdCommand(args: readonly string[], deps: CliDeps): Promi
       deps.stderr(`warning: ${describe(error)}\n`);
     });
   }
+}
+
+/**
+ * GetOrganization and the build: a refusal and an interruption pass through, a credentials failure is
+ * DIADOC_AUTH as in `send`, anything else TEST_UTD_FAILED.
+ */
+async function lookupStep<T>(
+  signal: AbortSignal | undefined,
+  fn: (diadoc: CliDiadoc) => Promise<T>,
+  diadoc: CliDiadoc,
+): Promise<T> {
+  try {
+    return await fn(diadoc);
+  } catch (error) {
+    if (error instanceof TestUtdRefusedError) throw error;
+    if (signal?.aborted === true && error === signal.reason) throw error;
+    throw new CliSetupError(isAuthFailure(error) ? 'DIADOC_AUTH' : 'TEST_UTD_FAILED', {
+      cause: error,
+    });
+  }
+}
+
+/** The path as one shell word, for the hint on stderr. */
+function shellQuote(path: string): string {
+  return /^[\w./:@%+,=-]+$/.test(path) ? path : `'${path.replace(/'/g, "'\\''")}'`;
 }
 
 /** Records the operationId and messageId of PostMessage in `state` for the second signal. */
@@ -510,6 +544,7 @@ export type CliSetupCode =
   | 'READ_FAILED'
   | 'SIGNER_CONFIG'
   | 'DIADOC_CONFIG'
+  | 'DIADOC_AUTH'
   | 'TEST_UTD_FAILED'
   | 'WRITE_FAILED';
 
