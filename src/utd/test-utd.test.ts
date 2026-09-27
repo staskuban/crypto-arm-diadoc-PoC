@@ -5,8 +5,15 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { parseUtd } from '../utd/index.js';
-import { buildTestUtd, partyFromOrganization, type TestUtdParams } from './test-utd.js';
+import { parseUtd } from './index.js';
+import type { Organization } from '../diadoc/index.js';
+import {
+  buildTestUtd,
+  makeTestUtd,
+  partyFromOrganization,
+  TestUtdRefusedError,
+  type TestUtdParams,
+} from './test-utd.js';
 
 const XSD = new URL('../../spikes/diadoc/xsd/ON_NSCHFDOPPR_1_997_01_05_03_05.xsd', import.meta.url)
   .pathname;
@@ -96,5 +103,80 @@ describe('buildTestUtd', () => {
     expect(() => partyFromOrganization({ Inn: '9620316755', Kpp: '962001000' })).toThrow(
       /FnsParticipantId/,
     );
+  });
+});
+
+describe('makeTestUtd', () => {
+  const SELLER: Organization = {
+    FullName: 'Тестовая организация №2031675',
+    Inn: '9620316755',
+    Kpp: '962001000',
+    FnsParticipantId: '2BM-9620316755-962001000-202609250245017009189',
+    IsTest: true,
+  };
+  const BUYER: Organization = {
+    FullName: 'Тестовая организация №5999872',
+    Inn: '9659998725',
+    Kpp: '965901000',
+    FnsParticipantId: '2BM-9659998725-965901000-202609250235309299170',
+    IsTest: true,
+  };
+
+  // Diadoc leaves IsTest out for a real organisation.
+  function withoutIsTest(org: Organization): Organization {
+    const copy = { ...org };
+    delete copy.IsTest;
+    return copy;
+  }
+
+  function lookup(orgs: Record<string, Organization>) {
+    const calls: { boxId: string; signal: AbortSignal | undefined }[] = [];
+    const getOrganization = (boxId: string, o: { signal?: AbortSignal | undefined } = {}) => {
+      calls.push({ boxId, signal: o.signal });
+      const org = orgs[boxId];
+      return org === undefined ? Promise.reject(new Error(`404 ${boxId}`)) : Promise.resolve(org);
+    };
+    return { getOrganization, calls };
+  }
+
+  it('builds the УПД from the sender (seller) and recipient (buyer) boxes', async () => {
+    const { getOrganization, calls } = lookup({ from: SELLER, to: BUYER });
+    const signal = new AbortController().signal;
+    const utd = await makeTestUtd(
+      { getOrganization },
+      { fromBoxId: 'from', toBoxId: 'to', date: PARAMS.date, guid: PARAMS.guid, signal },
+    );
+
+    expect(calls).toEqual([
+      { boxId: 'from', signal },
+      { boxId: 'to', signal },
+    ]);
+    expect(utd.fileName).toBe(buildTestUtd(PARAMS).fileName);
+    expect(utd.seller).toMatchObject({ inn: '9620316755', kpp: '962001000' });
+    expect(utd.buyer).toMatchObject({ inn: '9659998725', kpp: '965901000' });
+    expect(parseUtd(utd).function).toBe('СЧФДОП');
+  });
+
+  it('passes minBytes through', async () => {
+    const { getOrganization } = lookup({ from: SELLER, to: BUYER });
+    const utd = await makeTestUtd(
+      { getOrganization },
+      { fromBoxId: 'from', toBoxId: 'to', date: PARAMS.date, guid: PARAMS.guid, minBytes: 20_000 },
+    );
+    expect(utd.content.length).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it.each([
+    ['sender', { from: { ...SELLER, IsTest: false }, to: BUYER }, /sender box from/],
+    ['recipient', { from: SELLER, to: withoutIsTest(BUYER) }, /recipient box to/],
+  ])('refuses a %s box that is not a test organisation', async (_, orgs, message) => {
+    const { getOrganization } = lookup(orgs);
+    const made = makeTestUtd(
+      { getOrganization },
+      { fromBoxId: 'from', toBoxId: 'to', date: PARAMS.date, guid: PARAMS.guid },
+    );
+    await expect(made).rejects.toBeInstanceOf(TestUtdRefusedError);
+    await expect(made).rejects.toThrow(message);
+    await expect(made).rejects.toMatchObject({ code: 'TEST_UTD_REFUSED' });
   });
 });
