@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 // Thin CLI over the pipeline: `send <file.xml>` signs a УПД via КриптоАРМ Server (or posts it with
-// Diadoc's test signature, SIGNER_KIND=diadoc-test) and posts it to Diadoc.
+// Diadoc's test signature, SIGNER_KIND=diadoc-test) and posts it to Diadoc; `make-test-utd` writes a
+// test УПД between the two configured test boxes (F22).
 // Settings come from env (see .env.example); `npm run cli -- send <file.xml>` loads ./.env.
 import { writeSync } from 'node:fs';
-import { readFile as fsReadFile, stat } from 'node:fs/promises';
+import {
+  mkdir as fsMkdir,
+  readFile as fsReadFile,
+  stat,
+  writeFile as fsWriteFile,
+} from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:os';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -30,6 +36,7 @@ import {
 } from './pipeline/index.js';
 import { createSignerFromEnv, signerKind, type Signer } from './signer/index.js';
 import { DIADOC_TEST_SIGNATURE } from './utd/index.js';
+import { makeTestUtd, TestUtdRefusedError, type Party } from './utd/test-utd.js';
 
 export type CliEnv = Record<string, string | undefined>;
 
@@ -81,9 +88,16 @@ export interface CliDeps {
   send?: typeof sendUtd;
   signal?: AbortSignal;
   state?: RunState;
+  /** make-test-utd: creates the output directory (recursive). */
+  mkdir?: (dir: string) => Promise<void>;
+  /** make-test-utd: creates the file, failing if it exists. */
+  writeFile?: (path: string, content: Buffer) => Promise<void>;
+  now?: () => Date;
+  uuid?: () => string;
 }
 
 const USAGE = `Usage: cli send <file.xml> [--no-precheck] [--resend[=<salt>]]
+       cli make-test-utd [--out=<dir>] [--min-bytes=<n>]
 
 Signs the УПД with КриптоАРМ Server (SIGNER_KIND=diadoc-test: Diadoc's test signature instead,
 test boxes only) and posts it to Контур.Диадок.
@@ -96,6 +110,11 @@ or sender signature rejected (reason on stderr), 4 posted but not trackable. Run
 Everything after -- is the file name (for a name that starts with -).
 The first Ctrl+C/SIGTERM stops after the current step (a running PostMessage ends within its time
 budget); a second one exits at once (130/143), printing the operationId known so far.
+
+make-test-utd writes a test УПД (СЧФДОП 5.03, windows-1251) from DIADOC_FROM_BOX_ID (seller) to
+DIADOC_TO_BOX_ID (buyer), with their details from GetOrganization, into <dir> (default ./utd) as
+<ИдФайл>.xml and prints its path as JSON. Test boxes (IsTest) only; --min-bytes pads it with goods rows.
+Exit codes: 0 written, 1 failed, 2 usage.
 `;
 
 export async function main(argv: readonly string[], deps: CliDeps): Promise<number> {
@@ -104,6 +123,7 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     deps.stdout(USAGE);
     return EXIT.ok;
   }
+  if (command === 'make-test-utd') return makeTestUtdCommand(rest, deps);
   const end = rest.indexOf('--');
   const options = end === -1 ? rest : rest.slice(0, end);
   const files = [
@@ -203,6 +223,90 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     // The exit code is already decided (and the JSON printed); a failing release must not change it.
     await diadoc?.close?.().catch((error: unknown) => {
       deps.stderr(`warning: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  }
+}
+
+const MIN_BYTES = /^(0|[1-9][0-9]*)$/;
+
+async function makeTestUtdCommand(args: readonly string[], deps: CliDeps): Promise<number> {
+  const outs = args.filter((a) => a.startsWith('--out='));
+  const sizes = args.filter((a) => a.startsWith('--min-bytes='));
+  const [out = '--out=utd'] = outs;
+  const [size] = sizes;
+  const dir = out.slice('--out='.length);
+  const minText = size?.slice('--min-bytes='.length);
+  const minBytes = minText === undefined ? undefined : Number(minText);
+  if (
+    args.length !== outs.length + sizes.length ||
+    outs.length > 1 ||
+    sizes.length > 1 ||
+    dir === '' ||
+    (minText !== undefined && (!MIN_BYTES.test(minText) || Number(minText) > SHELF_MAX_BYTES))
+  ) {
+    deps.stderr(USAGE);
+    return EXIT.usage;
+  }
+
+  let diadoc: CliDiadoc | undefined;
+  try {
+    const config = await setupStep('PIPELINE_CONFIG', () => loadPipelineConfig(deps.env));
+    diadoc = await setupStep('DIADOC_CONFIG', () =>
+      (deps.createDiadoc ?? createDiadoc)(deps.env, deps.stderr, deps.state ?? {}),
+    );
+    const lookup = diadoc;
+    const utd = await (async () => {
+      try {
+        return await makeTestUtd(lookup, {
+          fromBoxId: config.fromBoxId,
+          toBoxId: config.toBoxId,
+          date: (deps.now ?? (() => new Date()))(),
+          guid: (deps.uuid ?? randomUUID)(),
+          ...(minBytes === undefined ? {} : { minBytes }),
+          ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+        });
+      } catch (error) {
+        if (error instanceof TestUtdRefusedError) throw error;
+        if (deps.signal?.aborted === true && error === deps.signal.reason) throw error;
+        throw new CliSetupError('TEST_UTD_FAILED', { cause: error });
+      }
+    })();
+    const path = join(dir, utd.fileName);
+    await setupStep('WRITE_FAILED', async () => {
+      await (deps.mkdir ?? ((d) => fsMkdir(d, { recursive: true }).then(() => undefined)))(dir);
+      await (deps.writeFile ?? ((p, c) => fsWriteFile(p, c, { flag: 'wx' })))(path, utd.content);
+    });
+    const party = (p: Party) => ({ name: p.name, inn: p.inn, kpp: p.kpp });
+    deps.stdout(
+      `${JSON.stringify(
+        {
+          path,
+          fileName: utd.fileName,
+          bytes: utd.content.length,
+          seller: party(utd.seller),
+          buyer: party(utd.buyer),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    deps.stderr(`test УПД written; sign and send it with: npm run cli -- send ${path}\n`);
+    return EXIT.ok;
+  } catch (error) {
+    const interrupted = deps.signal?.aborted === true && error === deps.signal.reason;
+    deps.stderr(
+      `${
+        interrupted
+          ? `error [INTERRUPTED] ${describe(error)}`
+          : error instanceof TestUtdRefusedError
+            ? `error [${error.code}] ${error.message}`
+            : describeFailure(error)
+      }\n`,
+    );
+    return EXIT.failed;
+  } finally {
+    await diadoc?.close?.().catch((error: unknown) => {
+      deps.stderr(`warning: ${describe(error)}\n`);
     });
   }
 }
@@ -401,7 +505,13 @@ function describe(error: unknown): string {
 }
 
 /** Codes for failures before the pipeline starts, printed like `PipelineError` codes. */
-export type CliSetupCode = 'PIPELINE_CONFIG' | 'READ_FAILED' | 'SIGNER_CONFIG' | 'DIADOC_CONFIG';
+export type CliSetupCode =
+  | 'PIPELINE_CONFIG'
+  | 'READ_FAILED'
+  | 'SIGNER_CONFIG'
+  | 'DIADOC_CONFIG'
+  | 'TEST_UTD_FAILED'
+  | 'WRITE_FAILED';
 
 class CliSetupError extends Error {
   override readonly name = 'CliSetupError';
