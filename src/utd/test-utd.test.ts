@@ -10,6 +10,7 @@ import type { Organization } from '../diadoc/index.js';
 import {
   buildTestUtd,
   makeTestUtd,
+  MAX_TEST_UTD_BYTES,
   partyFromOrganization,
   TestUtdRefusedError,
   type TestUtdParams,
@@ -178,5 +179,60 @@ describe('makeTestUtd', () => {
     await expect(made).rejects.toBeInstanceOf(TestUtdRefusedError);
     await expect(made).rejects.toThrow(message);
     await expect(made).rejects.toMatchObject({ code: 'TEST_UTD_REFUSED' });
+  });
+  it('stops before a lookup once aborted, with the signal reason', async () => {
+    const { getOrganization, calls } = lookup({ from: SELLER, to: BUYER });
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGINT)');
+    controller.abort(reason);
+    const made = makeTestUtd(
+      { getOrganization },
+      {
+        fromBoxId: 'from',
+        toBoxId: 'to',
+        date: PARAMS.date,
+        guid: PARAMS.guid,
+        signal: controller.signal,
+      },
+    );
+    await expect(made).rejects.toBe(reason);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('turns a lookup aborted by the signal (AbortError) into the signal reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('interrupted (SIGTERM)');
+    const getOrganization = () => {
+      controller.abort(reason);
+      return Promise.reject(new DOMException('This operation was aborted', 'AbortError'));
+    };
+    const made = makeTestUtd(
+      { getOrganization },
+      {
+        fromBoxId: 'from',
+        toBoxId: 'to',
+        date: PARAMS.date,
+        guid: PARAMS.guid,
+        signal: controller.signal,
+      },
+    );
+    await expect(made).rejects.toBe(reason);
+  });
+
+  it('refuses minBytes above MAX_TEST_UTD_BYTES before any lookup', async () => {
+    const { getOrganization, calls } = lookup({ from: SELLER, to: BUYER });
+    const made = makeTestUtd(
+      { getOrganization },
+      {
+        fromBoxId: 'from',
+        toBoxId: 'to',
+        date: PARAMS.date,
+        guid: PARAMS.guid,
+        minBytes: MAX_TEST_UTD_BYTES + 1,
+      },
+    );
+    await expect(made).rejects.toThrow(RangeError);
+    expect(calls).toHaveLength(0);
+    expect(() => buildTestUtd({ ...PARAMS, minBytes: MAX_TEST_UTD_BYTES + 1 })).toThrow(RangeError);
   });
 });
