@@ -445,31 +445,33 @@ describe.skipIf(!enabled)('Диадок e2e (live, test boxes)', () => {
     CASE_TIMEOUT_MS,
   );
 
+  async function testCaNegative(): Promise<void> {
+    const { path } = await newUtd();
+    // Polling ends at the error status; the long deadline only covers a slow signature check.
+    const run = await runCli(['send', path], {
+      SIGNER_KIND: 'server',
+      PIPELINE_STATUS_TIMEOUT_MS: '120000',
+    });
+
+    expect(run.code).toBe(EXIT.docflowError);
+    expect(run.stderr).toMatch(/^docflow error \[SENDER_CERTIFICATE_REJECTED\] /m);
+    expect(run.result).toMatchObject({
+      outcome: 'error',
+      status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка в подписи' } },
+      signatureCheck: {
+        senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
+        reason: 'certificate',
+        mathValid: true,
+        certificateValid: false,
+        delivered: false,
+      },
+    });
+    expect(run.result?.testSignature).toBeUndefined();
+  }
+
   it.skipIf(!serverSigner)(
     'КриптоАРМ Server CMS from the test CA: posted, «Ошибка в подписи», exit 3 with the reason (D202)',
-    async () => {
-      const { path } = await newUtd();
-      // Polling ends at the error status; the long deadline only covers a slow signature check.
-      const run = await runCli(['send', path], {
-        SIGNER_KIND: 'server',
-        PIPELINE_STATUS_TIMEOUT_MS: '120000',
-      });
-
-      expect(run.code).toBe(EXIT.docflowError);
-      expect(run.stderr).toMatch(/^docflow error \[SENDER_CERTIFICATE_REJECTED\] /m);
-      expect(run.result).toMatchObject({
-        outcome: 'error',
-        status: { PrimaryStatus: { Severity: 'Error', StatusText: 'Ошибка в подписи' } },
-        signatureCheck: {
-          senderSignatureStatus: 'SenderSignatureCheckedAndInvalid',
-          reason: 'certificate',
-          mathValid: true,
-          certificateValid: false,
-          delivered: false,
-        },
-      });
-      expect(run.result?.testSignature).toBeUndefined();
-    },
+    testCaNegative,
     CASE_TIMEOUT_MS,
   );
 

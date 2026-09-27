@@ -6,7 +6,7 @@
 # is the ROOT compose project (`graph-root`, which `include`s this file); from the repo root:
 #   docker compose build cryptoarm-server-image && docker compose up -d --wait cryptoarm-server
 # Used alone (`-f` this file or from this directory) it is another project, `kryptoarm-diadoc-cryptoarm-server`,
-# with its own network, which the Документы stand (graph-root_default) does not join.
+# with its own network.
 # The default tag `…:stand-i6` belongs to this file (F10): the tmpfs below needs the I6 start.sh (D40). A host
 # with only an older image fails with "No such image" and keeps the running container; rolling a stand
 # onto this file: README.md "Rollout on the shared stand". A throwaway stand next to the shared one:
