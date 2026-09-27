@@ -13,10 +13,16 @@ import {
   type CliEnv,
   type RunState,
 } from './cli.js';
-import { POST_MESSAGE_BUDGET_MS, SHELF_MAX_BYTES, type Message } from './diadoc/index.js';
+import {
+  DiadocAuthError,
+  POST_MESSAGE_BUDGET_MS,
+  SHELF_MAX_BYTES,
+  type Message,
+} from './diadoc/index.js';
 import type { PipelineDiadoc, SendUtdResult } from './pipeline/index.js';
 import { PipelineError } from './pipeline/index.js';
 import type { Signer } from './signer/index.js';
+import { MAX_TEST_UTD_BYTES } from './utd/test-utd.js';
 
 const ENV = { DIADOC_FROM_BOX_ID: 'from', DIADOC_TO_BOX_ID: 'to' };
 
@@ -760,21 +766,20 @@ describe('docker compose app service', () => {
 });
 
 describe('cli make-test-utd', () => {
-  const ORG = {
-    Kpp: '962001000',
-    IsTest: true,
-  };
+  const ORG = { IsTest: true };
   const ORGS: Record<string, Record<string, unknown>> = {
     from: {
       ...ORG,
       FullName: 'Продавец',
       Inn: '9620316755',
+      Kpp: '962001000',
       FnsParticipantId: '2BM-9620316755-962001000-1',
     },
     to: {
       ...ORG,
       FullName: 'Покупатель',
       Inn: '9659998725',
+      Kpp: '965901000',
       FnsParticipantId: '2BM-9659998725-965901000-2',
     },
   };
@@ -784,7 +789,7 @@ describe('cli make-test-utd', () => {
     const err: string[] = [];
     const written: { path: string; content: Buffer }[] = [];
     const dirs: string[] = [];
-    let closed = 0;
+    const closed = Object.assign(() => closed.count, { count: 0 });
     const deps: CliDeps = {
       env,
       readFile: () => Promise.reject(new Error('not used')),
@@ -800,7 +805,7 @@ describe('cli make-test-utd', () => {
               : Promise.resolve(org);
           },
           close: () => {
-            closed++;
+            closed.count++;
             return Promise.resolve();
           },
         } as unknown as PipelineDiadoc),
@@ -815,7 +820,7 @@ describe('cli make-test-utd', () => {
       now: () => new Date(2026, 8, 27, 10, 0, 0),
       uuid: () => '0f8fad5b-d9cb-469f-a165-70867728950e',
     };
-    return { deps, out, err, written, dirs, closed: () => closed };
+    return { deps, out, err, written, dirs, closed };
   }
 
   const FILE =
@@ -837,7 +842,7 @@ describe('cli make-test-utd', () => {
       fileName: FILE,
       bytes: file?.content.length,
       seller: { name: 'Продавец', inn: '9620316755', kpp: '962001000' },
-      buyer: { name: 'Покупатель', inn: '9659998725', kpp: '962001000' },
+      buyer: { name: 'Покупатель', inn: '9659998725', kpp: '965901000' },
     });
     expect(err.join('')).toContain(`npm run cli -- send ${join('utd', FILE)}`);
     expect(closed()).toBe(1);
@@ -857,7 +862,7 @@ describe('cli make-test-utd', () => {
     [['make-test-utd', '--out=']],
     [['make-test-utd', '--min-bytes=abc']],
     [['make-test-utd', '--min-bytes=-1']],
-    [['make-test-utd', `--min-bytes=${String(SHELF_MAX_BYTES + 1)}`]],
+    [['make-test-utd', `--min-bytes=${String(MAX_TEST_UTD_BYTES + 1)}`]],
     [['make-test-utd', '--out=a', '--out=b']],
   ])('%j is usage', async (argv) => {
     const { deps, err, written } = setupMake();
@@ -878,16 +883,82 @@ describe('cli make-test-utd', () => {
   });
 
   it('reports a failed lookup as TEST_UTD_FAILED', async () => {
-    const { deps, err } = setupMake({ from: ORGS.from ?? {} });
+    const { deps, err, closed } = setupMake({ from: ORGS.from ?? {} });
     expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
     expect(err.join('')).toMatch(/^error \[TEST_UTD_FAILED\] 404 to/);
+    expect(closed()).toBe(1);
   });
 
   it('reports a failed write as WRITE_FAILED', async () => {
-    const { deps, err } = setupMake();
+    const { deps, err, closed } = setupMake();
     deps.writeFile = () => Promise.reject(new Error('EACCES'));
     expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
     expect(err.join('')).toMatch(/^error \[WRITE_FAILED\] EACCES/);
+    expect(closed()).toBe(1);
+  });
+
+  it('reports a failed token refresh as DIADOC_AUTH, like send', async () => {
+    const { deps, err, closed } = setupMake();
+    const auth = new DiadocAuthError(
+      'token request failed: 400 invalid_client',
+      400,
+      'invalid_client',
+    );
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        getOrganization: () => Promise.reject(new Error('GetOrganization failed', { cause: auth })),
+        close: () => {
+          closed.count++;
+          return Promise.resolve();
+        },
+      } as unknown as PipelineDiadoc);
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[DIADOC_AUTH\] GetOrganization failed/);
+    expect(closed.count).toBe(1);
+  });
+
+  it('reports an interrupted lookup as INTERRUPTED and writes nothing', async () => {
+    const { deps, err, written, closed } = setupMake();
+    const controller = new AbortController();
+    deps.signal = controller.signal;
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        getOrganization: () => {
+          controller.abort(new Error('interrupted (SIGINT)'));
+          return Promise.reject(new DOMException('This operation was aborted', 'AbortError'));
+        },
+        close: () => {
+          closed.count++;
+          return Promise.resolve();
+        },
+      } as unknown as PipelineDiadoc);
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[INTERRUPTED\] interrupted \(SIGINT\)/);
+    expect(written).toHaveLength(0);
+    expect(closed.count).toBe(1);
+  });
+
+  it('writes nothing when interrupted after both lookups', async () => {
+    const { deps, err, written } = setupMake();
+    const controller = new AbortController();
+    deps.signal = controller.signal;
+    deps.createDiadoc = () =>
+      Promise.resolve({
+        getOrganization: (boxId: string) => {
+          if (boxId === 'to') controller.abort(new Error('interrupted (SIGTERM)'));
+          return Promise.resolve(ORGS[boxId]);
+        },
+      } as unknown as PipelineDiadoc);
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[INTERRUPTED\]/);
+    expect(written).toHaveLength(0);
+  });
+
+  it('defaults --out to UTD_DIR and quotes a path the shell would split', async () => {
+    const { deps, dirs, err } = setupMake(ORGS, { ...ENV, UTD_DIR: 'my docs' });
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.ok);
+    expect(dirs).toEqual(['my docs']);
+    expect(err.join('')).toContain(`npm run cli -- send '${join('my docs', FILE)}'`);
   });
 
   it('needs both box ids (PIPELINE_CONFIG) before it asks Diadoc', async () => {

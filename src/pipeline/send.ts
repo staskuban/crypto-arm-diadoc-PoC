@@ -515,7 +515,7 @@ function postError(error: unknown, operationId: string, resend: string | undefin
  * A DiadocAuthError, or an error caused by one; not a refresh skipped for lack of time before a
  * deadline (DiadocTokenDeadlineError), which says nothing about the credentials.
  */
-function isAuthFailure(error: unknown): boolean {
+export function isAuthFailure(error: unknown): boolean {
   for (let e: unknown = error, depth = 0; e instanceof Error && depth < 8; e = e.cause, depth++) {
     if (e instanceof DiadocTokenDeadlineError) return false;
     if (e instanceof DiadocAuthError) return true;
