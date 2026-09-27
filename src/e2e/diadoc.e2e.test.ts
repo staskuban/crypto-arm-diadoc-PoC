@@ -30,7 +30,7 @@ import {
   type Message,
 } from '../diadoc/index.js';
 import { customDocumentIdFor, type SendUtdResult } from '../pipeline/index.js';
-import { buildTestUtd, partyFromOrganization, type Party, type TestUtd } from './test-utd.js';
+import { buildTestUtd, partyFromOrganization, type Party, type TestUtd } from '../utd/test-utd.js';
 
 const enabled = process.env.DIADOC_E2E === '1';
 const probes = enabled && process.env.DIADOC_E2E_PROBES === '1';

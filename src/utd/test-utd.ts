@@ -1,8 +1,8 @@
-// Test УПД for the live e2e (T6): a minimal СЧФДОП seller title, ФНС format 5.03 (приказ
-// ЕД-7-26/970@, XSD ON_NSCHFDOPPR_1_997_01_05_03_05), windows-1251, ported from the S1 spike
-// (spikes/diadoc/src/utd.ts). Goods rows pad it to a size (inline vs shelf vs shelf parts).
-// Not production code: real УПД come from the ERP.
-import type { Organization } from '../diadoc/index.js';
+// Test УПД: a minimal СЧФДОП seller title, ФНС format 5.03 (приказ ЕД-7-26/970@, XSD
+// ON_NSCHFDOPPR_1_997_01_05_03_05), windows-1251, ported from the S1 spike (spikes/diadoc/src/utd.ts).
+// Goods rows pad it to a size (inline vs shelf vs shelf parts). Used by the live e2e (T6) and the CLI
+// `make-test-utd` (F22), for the Diadoc test boxes only: real УПД come from the ERP.
+import type { Organization, RequestOptions } from '../diadoc/index.js';
 
 export interface Party {
   name: string;
@@ -53,6 +53,59 @@ export function partyFromOrganization(
     regionCode,
     regionName: REGION_NAMES[regionCode] ?? `Субъект РФ ${regionCode}`,
   };
+}
+
+/** A box of `makeTestUtd` is not a test organisation: nothing was built. */
+export class TestUtdRefusedError extends Error {
+  override readonly name = 'TestUtdRefusedError';
+  readonly code = 'TEST_UTD_REFUSED';
+}
+
+export interface MakeTestUtdOptions {
+  fromBoxId: string;
+  toBoxId: string;
+  date: Date;
+  guid: string;
+  minBytes?: number;
+  signal?: AbortSignal;
+}
+
+export type MadeTestUtd = TestUtd & { seller: Party; buyer: Party };
+
+/**
+ * A test УПД from the sender (seller) to the recipient (buyer) box, with the parties' details from
+ * `GetOrganization`. Refuses unless both boxes are test organisations (`IsTest`), so a made-up УПД
+ * never goes to a real counteragent (F22).
+ */
+export async function makeTestUtd(
+  diadoc: { getOrganization(boxId: string, o?: RequestOptions): Promise<Organization> },
+  options: MakeTestUtdOptions,
+): Promise<MadeTestUtd> {
+  const o = options.signal === undefined ? {} : { signal: options.signal };
+  const parties: Party[] = [];
+  for (const [role, boxId] of [
+    ['sender', options.fromBoxId],
+    ['recipient', options.toBoxId],
+  ] as const) {
+    const org = await diadoc.getOrganization(boxId, o);
+    if (org.IsTest !== true) {
+      throw new TestUtdRefusedError(
+        `test УПД are only for test boxes, but the ${role} box ${boxId} ` +
+          `(${org.FullName ?? org.ShortName ?? org.Inn ?? '?'}) is not a test organisation ` +
+          `(IsTest: ${JSON.stringify(org.IsTest ?? null)})`,
+      );
+    }
+    parties.push(partyFromOrganization(org));
+  }
+  const [seller, buyer] = parties as [Party, Party];
+  const utd = buildTestUtd({
+    seller,
+    buyer,
+    date: options.date,
+    guid: options.guid,
+    ...(options.minBytes === undefined ? {} : { minBytes: options.minBytes }),
+  });
+  return { ...utd, seller, buyer };
 }
 
 export function buildTestUtd(p: TestUtdParams): TestUtd {

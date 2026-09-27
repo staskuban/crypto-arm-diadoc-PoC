@@ -758,3 +758,170 @@ describe('docker compose app service', () => {
     expect(Number(grace) * 1000).toBeGreaterThanOrEqual(POST_MESSAGE_BUDGET_MS + 15_000);
   });
 });
+
+describe('cli make-test-utd', () => {
+  const ORG = {
+    Kpp: '962001000',
+    IsTest: true,
+  };
+  const ORGS: Record<string, Record<string, unknown>> = {
+    from: {
+      ...ORG,
+      FullName: 'Продавец',
+      Inn: '9620316755',
+      FnsParticipantId: '2BM-9620316755-962001000-1',
+    },
+    to: {
+      ...ORG,
+      FullName: 'Покупатель',
+      Inn: '9659998725',
+      FnsParticipantId: '2BM-9659998725-965901000-2',
+    },
+  };
+
+  function setupMake(orgs = ORGS, env: CliEnv = ENV) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const written: { path: string; content: Buffer }[] = [];
+    const dirs: string[] = [];
+    let closed = 0;
+    const deps: CliDeps = {
+      env,
+      readFile: () => Promise.reject(new Error('not used')),
+      fileSize: () => Promise.reject(new Error('not used')),
+      stdout: (s) => out.push(s),
+      stderr: (s) => err.push(s),
+      createDiadoc: () =>
+        Promise.resolve({
+          getOrganization: (boxId: string) => {
+            const org = orgs[boxId];
+            return org === undefined
+              ? Promise.reject(new Error(`404 ${boxId}`))
+              : Promise.resolve(org);
+          },
+          close: () => {
+            closed++;
+            return Promise.resolve();
+          },
+        } as unknown as PipelineDiadoc),
+      mkdir: (dir) => {
+        dirs.push(dir);
+        return Promise.resolve();
+      },
+      writeFile: (path, content) => {
+        written.push({ path, content });
+        return Promise.resolve();
+      },
+      now: () => new Date(2026, 8, 27, 10, 0, 0),
+      uuid: () => '0f8fad5b-d9cb-469f-a165-70867728950e',
+    };
+    return { deps, out, err, written, dirs, closed: () => closed };
+  }
+
+  const FILE =
+    'ON_NSCHFDOPPR_2BM-9659998725-965901000-2_2BM-9620316755-962001000-1_20260927_' +
+    '0f8fad5b-d9cb-469f-a165-70867728950e_0_0_0_0_0_00.xml';
+
+  it('writes a test УПД from the sender to the recipient box into ./utd and prints JSON', async () => {
+    const { deps, out, err, written, dirs, closed } = setupMake();
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.ok);
+
+    expect(dirs).toEqual(['utd']);
+    expect(written.map((w) => w.path)).toEqual([join('utd', FILE)]);
+    const [file] = written;
+    const text = new TextDecoder('windows-1251').decode(file?.content);
+    expect(text).toContain(`ИдФайл="${FILE.slice(0, -4)}"`);
+    const result = JSON.parse(out.join('')) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      path: join('utd', FILE),
+      fileName: FILE,
+      bytes: file?.content.length,
+      seller: { name: 'Продавец', inn: '9620316755', kpp: '962001000' },
+      buyer: { name: 'Покупатель', inn: '9659998725', kpp: '962001000' },
+    });
+    expect(err.join('')).toContain(`npm run cli -- send ${join('utd', FILE)}`);
+    expect(closed()).toBe(1);
+  });
+
+  it('takes --out=<dir> and --min-bytes=<n>', async () => {
+    const { deps, written, dirs } = setupMake();
+    expect(await main(['make-test-utd', '--out=/tmp/x', '--min-bytes=20000'], deps)).toBe(EXIT.ok);
+    expect(dirs).toEqual(['/tmp/x']);
+    expect(written[0]?.path).toBe(join('/tmp/x', FILE));
+    expect(written[0]?.content.length).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it.each([
+    [['make-test-utd', 'a.xml']],
+    [['make-test-utd', '--bogus']],
+    [['make-test-utd', '--out=']],
+    [['make-test-utd', '--min-bytes=abc']],
+    [['make-test-utd', '--min-bytes=-1']],
+    [['make-test-utd', `--min-bytes=${String(SHELF_MAX_BYTES + 1)}`]],
+    [['make-test-utd', '--out=a', '--out=b']],
+  ])('%j is usage', async (argv) => {
+    const { deps, err, written } = setupMake();
+    expect(await main(argv, deps)).toBe(EXIT.usage);
+    expect(err.join('')).toMatch(/make-test-utd/);
+    expect(written).toHaveLength(0);
+  });
+
+  it('refuses a box that is not a test organisation: exit 1, nothing written', async () => {
+    const { deps, err, written, closed } = setupMake({
+      ...ORGS,
+      to: { ...ORGS.to, IsTest: false },
+    });
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[TEST_UTD_REFUSED\] .*recipient box to/);
+    expect(written).toHaveLength(0);
+    expect(closed()).toBe(1);
+  });
+
+  it('reports a failed lookup as TEST_UTD_FAILED', async () => {
+    const { deps, err } = setupMake({ from: ORGS.from ?? {} });
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[TEST_UTD_FAILED\] 404 to/);
+  });
+
+  it('reports a failed write as WRITE_FAILED', async () => {
+    const { deps, err } = setupMake();
+    deps.writeFile = () => Promise.reject(new Error('EACCES'));
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[WRITE_FAILED\] EACCES/);
+  });
+
+  it('needs both box ids (PIPELINE_CONFIG) before it asks Diadoc', async () => {
+    const { deps, err } = setupMake(ORGS, {});
+    let created = 0;
+    deps.createDiadoc = () => {
+      created++;
+      return Promise.reject(new Error('not reached'));
+    };
+    expect(await main(['make-test-utd'], deps)).toBe(EXIT.failed);
+    expect(err.join('')).toMatch(/^error \[PIPELINE_CONFIG\]/);
+    expect(created).toBe(0);
+  });
+
+  it('writes a real file exclusively by default', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'make-test-utd-'));
+    const { deps, out } = setupMake();
+    delete deps.mkdir;
+    delete deps.writeFile;
+    const target = join(dir, 'nested');
+    expect(await main(['make-test-utd', `--out=${target}`], deps)).toBe(EXIT.ok);
+    const { path } = JSON.parse(out.join('')) as { path: string };
+    expect((await stat(path)).size).toBeGreaterThan(1000);
+    // Same name again (fixed uuid in the test): never overwritten.
+    const again = setupMake();
+    delete again.deps.mkdir;
+    delete again.deps.writeFile;
+    expect(await main(['make-test-utd', `--out=${target}`], again.deps)).toBe(EXIT.failed);
+    expect(again.err.join('')).toMatch(/^error \[WRITE_FAILED\] .*EEXIST/);
+  });
+
+  it('is listed in --help', async () => {
+    const { deps, out } = setupMake();
+    expect(await main(['--help'], deps)).toBe(EXIT.ok);
+    expect(out.join('')).toMatch(/make-test-utd \[--out=<dir>\] \[--min-bytes=<n>\]/);
+  });
+});
